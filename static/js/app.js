@@ -1,4 +1,13 @@
 (() => {
+  document.querySelectorAll("[data-emoji]").forEach((node) => {
+    if (!window.twemoji) return;
+    window.twemoji.parse(node, {
+      base: "/static/vendor/twemoji/assets/",
+      folder: "svg",
+      ext: ".svg",
+    });
+  });
+
   const formatBytes = (value, suffix = "") => {
     let number = Number(value) || 0;
     const units = ["B", "KB", "MB", "GB", "TB"];
