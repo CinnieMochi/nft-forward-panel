@@ -255,7 +255,12 @@ class NftManager:
             return {}
         counts: dict[int, int] = {}
         for line in result.stdout.splitlines():
-            if not re.match(r"^(tcp|udp)\s", line):
+            # Depending on conntrack-tools version, extended output starts
+            # with either "tcp/udp" or an address-family prefix such as
+            # "ipv4 2 tcp/udp".
+            if not re.match(r"^(?:(?:ipv4|ipv6)\s+\d+\s+)?(?:tcp|udp)\s", line):
+                continue
+            if re.match(r"^(?:(?:ipv4|ipv6)\s+\d+\s+)?tcp\s", line) and re.search(r"\bTIME_WAIT\b", line):
                 continue
             # The first tuple is the original direction, before DNAT. Its
             # destination port is the panel's local listening port.
