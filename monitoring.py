@@ -11,6 +11,11 @@ from typing import Any, Iterable
 from nft_manager import NftManager
 
 
+SAMPLE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f UTC"
+LEGACY_SAMPLE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+MIN_SAMPLE_INTERVAL_SECONDS = 0.75
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -31,7 +36,7 @@ class TrafficMonitor:
 
     def sample(self, connection: sqlite3.Connection, rules: Iterable[sqlite3.Row]) -> dict[int, dict[str, float | int]]:
         now_dt = utc_now()
-        now_text = now_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        now_text = now_dt.strftime(SAMPLE_TIME_FORMAT)
         bucket = now_dt.replace(minute=(now_dt.minute // 5) * 5, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S UTC")
         raw = self.manager.traffic_counters()
         result: dict[int, dict[str, float | int]] = {}
@@ -39,29 +44,45 @@ class TrafficMonitor:
             rule_id, port = int(rule["id"]), int(rule["listen_port"])
             current = raw.get(port, {"inbound": 0, "outbound": 0})
             previous = connection.execute(
-                "SELECT inbound_bytes, outbound_bytes, sampled_at FROM rule_counter_state WHERE rule_id = ?",
+                "SELECT inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps FROM rule_counter_state WHERE rule_id = ?",
                 (rule_id,),
             ).fetchone()
+            if port not in raw:
+                result[rule_id] = {"inbound_bps": 0.0, "outbound_bps": 0.0}
+                continue
             delta_in = delta_out = 0
             elapsed = 5.0
             if previous:
-                try:
-                    previous_dt = datetime.strptime(previous["sampled_at"], "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-                    elapsed = max(0.1, (now_dt - previous_dt).total_seconds())
-                except ValueError:
-                    pass
+                previous_dt = None
+                for sample_format in (SAMPLE_TIME_FORMAT, LEGACY_SAMPLE_TIME_FORMAT):
+                    try:
+                        previous_dt = datetime.strptime(previous["sampled_at"], sample_format).replace(tzinfo=timezone.utc)
+                        break
+                    except ValueError:
+                        continue
+                if previous_dt is not None:
+                    elapsed = max(0.0, (now_dt - previous_dt).total_seconds())
+                if elapsed < MIN_SAMPLE_INTERVAL_SECONDS:
+                    result[rule_id] = {
+                        "inbound_bps": float(previous["inbound_bps"]),
+                        "outbound_bps": float(previous["outbound_bps"]),
+                    }
+                    continue
                 delta_in = current["inbound"] - int(previous["inbound_bytes"])
                 delta_out = current["outbound"] - int(previous["outbound_bytes"])
                 if delta_in < 0:
-                    delta_in = current["inbound"]
+                    delta_in = 0
                 if delta_out < 0:
-                    delta_out = current["outbound"]
+                    delta_out = 0
+            inbound_bps = round(delta_in / elapsed, 1)
+            outbound_bps = round(delta_out / elapsed, 1)
             connection.execute(
-                """INSERT INTO rule_counter_state(rule_id, inbound_bytes, outbound_bytes, sampled_at)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO rule_counter_state(rule_id, inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(rule_id) DO UPDATE SET inbound_bytes=excluded.inbound_bytes,
-                   outbound_bytes=excluded.outbound_bytes, sampled_at=excluded.sampled_at""",
-                (rule_id, current["inbound"], current["outbound"], now_text),
+                   outbound_bytes=excluded.outbound_bytes, sampled_at=excluded.sampled_at,
+                   inbound_bps=excluded.inbound_bps, outbound_bps=excluded.outbound_bps""",
+                (rule_id, current["inbound"], current["outbound"], now_text, inbound_bps, outbound_bps),
             )
             if delta_in or delta_out:
                 connection.execute(
@@ -73,8 +94,8 @@ class TrafficMonitor:
                     (rule_id, int(rule["owner_id"]), bucket, delta_in, delta_out),
                 )
             result[rule_id] = {
-                "inbound_bps": round(delta_in / elapsed, 1),
-                "outbound_bps": round(delta_out / elapsed, 1),
+                "inbound_bps": inbound_bps,
+                "outbound_bps": outbound_bps,
             }
         cutoff = (now_dt - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S UTC")
         connection.execute("DELETE FROM traffic_buckets WHERE bucket_at < ?", (cutoff,))
