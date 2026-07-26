@@ -192,11 +192,12 @@ class NftManager:
                 f" limit rate over {max(1, rule.outbound_limit_mbps * 125)} kbytes/second drop"
                 if rule.outbound_limit_mbps else ""
             )
-            lines.extend([
-                "",
-                f'        ct direction original ct original proto-dst {rule.listen_port} counter comment "nfp:forward-in:{rule.listen_port}"{inbound_limit}',
-                f'        ct direction reply ct original proto-dst {rule.listen_port} counter comment "nfp:out:{rule.listen_port}"{outbound_limit}',
-            ])
+            lines.append("")
+            for protocol in ("tcp", "udp"):
+                lines.extend([
+                    f'        ct direction original ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:forward-in:{rule.listen_port}"',
+                    f'        ct direction reply ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:out:{rule.listen_port}"',
+                ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
 
