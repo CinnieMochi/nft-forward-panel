@@ -232,7 +232,10 @@ $DOMAIN {
 EOF
 caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null
 caddy fmt --overwrite "$CADDY_SNIPPET" >/dev/null
-if ! caddy validate --config /etc/caddy/Caddyfile; then
+chown root:caddy /etc/caddy/Caddyfile "$CADDY_SNIPPET"
+chmod 0644 /etc/caddy/Caddyfile
+chmod 0640 "$CADDY_SNIPPET"
+if ! runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile; then
     cp -a "/etc/caddy/Caddyfile.backup-$timestamp" /etc/caddy/Caddyfile
     rm -f "$CADDY_SNIPPET"
     die "Caddy validation failed; original Caddyfile restored"
