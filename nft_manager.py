@@ -195,8 +195,8 @@ class NftManager:
             lines.append("")
             for protocol in ("tcp", "udp"):
                 lines.extend([
-                    f'        ct direction original ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
-                    f'        ct direction reply ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
+                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
+                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
                 ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
