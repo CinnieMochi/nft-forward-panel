@@ -711,10 +711,95 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             flash(str(exc), "error")
         return redirect(url_for("dashboard"))
 
+    @app.post("/rules/<int:rule_id>/edit")
+    @login_required
+    def edit_rule(rule_id: int) -> Any:
+        require_csrf()
+        user = current_user()
+        manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
+        try:
+            with ApplyLock(Path(app.config["DATA_DIR"])):
+                connection = get_db()
+                current = connection.execute("SELECT * FROM forward_rules WHERE id=?", (rule_id,)).fetchone()
+                if current is None:
+                    raise NftOperationError("这条规则不存在或已被删除。")
+                if user["role"] != "admin" and int(current["owner_id"]) != int(user["id"]):
+                    abort(403)
+
+                owner_id = int(request.form.get("owner_id", current["owner_id"])) if user["role"] == "admin" else int(user["id"])
+                owner = connection.execute("SELECT * FROM users WHERE id=?", (owner_id,)).fetchone()
+                if owner is None or not owner["active"]:
+                    raise NftOperationError("请选择一个有效的启用用户作为规则所有者。")
+                listen_port = manager.validate_port(request.form.get("listen_port", ""))
+                if not int(owner["port_min"]) <= listen_port <= int(owner["port_max"]):
+                    raise NftOperationError(f"该用户只能使用 {owner['port_min']}–{owner['port_max']} 范围内的监听端口。")
+                owner_rule_count = connection.execute(
+                    "SELECT COUNT(*) FROM forward_rules WHERE owner_id=? AND id<>?", (owner_id, rule_id)
+                ).fetchone()[0]
+                if int(owner["max_rules"]) > 0 and owner_rule_count >= int(owner["max_rules"]):
+                    raise NftOperationError(f"该用户最多可创建 {owner['max_rules']} 条转发规则。")
+                if connection.execute("SELECT 1 FROM forward_rules WHERE listen_port=? AND id<>?", (listen_port, rule_id)).fetchone():
+                    raise NftOperationError(f"监听端口 {listen_port} 已有转发规则。")
+                if listen_port != int(current["listen_port"]) and manager.listening_port_in_use(listen_port):
+                    if user["role"] != "admin" or request.form.get("force_conflict") != "1":
+                        raise NftOperationError("该端口已被本机服务监听。仅管理员确认风险后可以继续修改。")
+
+                inbound_limit = int(request.form.get("inbound_limit_mbps", owner["default_inbound_mbps"]) or 0)
+                outbound_limit = int(request.form.get("outbound_limit_mbps", owner["default_outbound_mbps"]) or 0)
+                if user["role"] != "admin":
+                    inbound_limit = int(owner["default_inbound_mbps"])
+                    outbound_limit = int(owner["default_outbound_mbps"])
+                if not 0 <= inbound_limit <= 100000 or not 0 <= outbound_limit <= 100000:
+                    raise NftOperationError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
+                updated = ForwardRule(
+                    id=rule_id,
+                    listen_port=listen_port,
+                    destination_ip=manager.validate_ipv4(request.form.get("destination_ip", "")),
+                    destination_port=manager.validate_port(request.form.get("destination_port", "")),
+                    owner_id=owner_id,
+                    inbound_limit_mbps=inbound_limit,
+                    outbound_limit_mbps=outbound_limit,
+                )
+                pause_reason = desired_pause_reason(owner, monthly_usage(connection, owner))
+                all_rows = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
+                candidates = [row_to_rule(row) for row in all_rows if int(row["id"]) != rule_id and not row["paused_reason"]]
+                if not pause_reason:
+                    candidates.append(updated)
+                manager.apply_rules(candidates)
+
+                previous = row_to_rule(current)
+                connection.execute(
+                    """UPDATE forward_rules SET listen_port=?, destination_ip=?, destination_port=?, owner_id=?,
+                       inbound_limit_mbps=?, outbound_limit_mbps=?, paused_reason=? WHERE id=?""",
+                    (listen_port, updated.destination_ip, updated.destination_port, owner_id,
+                     inbound_limit, outbound_limit, pause_reason, rule_id),
+                )
+                connection.execute("DELETE FROM rule_counter_state WHERE rule_id=?", (rule_id,))
+                warnings = manager.firewall_open(updated) if not pause_reason else []
+                old_destination_used = any(
+                    int(row["id"]) != rule_id and row["destination_ip"] == previous.destination_ip
+                    and int(row["destination_port"]) == previous.destination_port for row in all_rows
+                )
+                if (previous.destination_ip, previous.destination_port) != (updated.destination_ip, updated.destination_port):
+                    warnings.extend(manager.firewall_close(previous, old_destination_used))
+                add_audit(
+                    "rule_update", str(rule_id),
+                    f"{previous.listen_port} → {previous.destination_ip}:{previous.destination_port}; "
+                    f"updated={updated.listen_port} → {updated.destination_ip}:{updated.destination_port}; "
+                    f"owner={owner['username']}; paused={pause_reason or 'no'}; {'; '.join(warnings)}",
+                )
+                connection.commit()
+            flash("转发规则已修改并重新加载。" + (" " + " ".join(warnings) if warnings else ""), "success")
+        except (ValueError, NftOperationError) as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("dashboard"))
+
     @app.post("/rules/<int:rule_id>/delete")
     @login_required
     def delete_rule(rule_id: int) -> Any:
         require_csrf()
+        if request.form.get("confirm_delete") != "1":
+            abort(400)
         user = current_user()
         manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
         try:
