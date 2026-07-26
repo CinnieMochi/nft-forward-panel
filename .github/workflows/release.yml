@@ -27,9 +27,11 @@ jobs:
           PANEL_SECRET_KEY: github-actions-test-secret
           PANEL_ADMIN_USERNAME: admin
           PANEL_ADMIN_PASSWORD: GitHubActionsOnly2026
-          PANEL_DATA_DIR: /tmp/nft-forward-panel-tests
           PANEL_COOKIE_SECURE: "0"
-        run: PYTHONPATH=. python -m unittest discover -s tests -v
+        run: |
+          export PANEL_DATA_DIR="$(mktemp -d)"
+          trap 'rm -rf "$PANEL_DATA_DIR"' EXIT
+          PYTHONPATH=. python -m unittest discover -s tests -v
 
       - name: Check installer syntax
         run: bash -n install.sh
