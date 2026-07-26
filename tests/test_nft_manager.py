@@ -1,6 +1,6 @@
 import unittest
 
-from nft_manager import NftManager, NftOperationError
+from nft_manager import ForwardRule, NftManager, NftOperationError
 
 
 class ValidationTests(unittest.TestCase):
@@ -29,6 +29,18 @@ class ValidationTests(unittest.TestCase):
         rendered = manager._render_config([])
         self.assertIn("table ip port_forward", rendered)
         self.assertNotIn("define LOCAL_IP", rendered)
+
+    def test_dnat_precedes_rule_comment(self):
+        manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
+        manager.local_ipv4 = lambda: "192.0.2.10"
+        rendered = manager._render_config([
+            ForwardRule(None, 10110, "141.11.219.150", 19849),
+        ])
+        self.assertIn(
+            'tcp dport 10110 counter dnat to 141.11.219.150:19849 comment "nfp:in:10110"',
+            rendered,
+        )
+        self.assertNotIn('comment "nfp:in:10110" dnat', rendered)
 
 
 if __name__ == "__main__":
