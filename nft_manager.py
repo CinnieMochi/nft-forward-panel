@@ -181,6 +181,22 @@ class NftManager:
                     f"        ip daddr {rule.destination_ip} udp dport {rule.destination_port} ct status dnat snat to $LOCAL_IP",
                 ]
             )
+        lines.extend(["    }", "", "    chain traffic_prerouting {"])
+        lines.append("        type filter hook prerouting priority 0; policy accept;")
+        for rule in sorted_rules:
+            lines.append("")
+            for protocol in ("tcp", "udp"):
+                lines.append(
+                    f'        ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter comment "nfp:traffic-in:{rule.listen_port}"'
+                )
+        lines.extend(["    }", "", "    chain traffic_postrouting {"])
+        lines.append("        type filter hook postrouting priority 0; policy accept;")
+        for rule in sorted_rules:
+            lines.append("")
+            for protocol in ("tcp", "udp"):
+                lines.append(
+                    f'        ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter comment "nfp:traffic-out:{rule.listen_port}"'
+                )
         lines.extend(["    }", "", "    chain forwarding {"])
         lines.append("        type filter hook forward priority 10; policy accept;")
         for rule in sorted_rules:
@@ -195,8 +211,8 @@ class NftManager:
             lines.append("")
             for protocol in ("tcp", "udp"):
                 lines.extend([
-                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
-                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
+                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:limit-out:{rule.listen_port}"',
+                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:limit-in:{rule.listen_port}"',
                 ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
@@ -215,8 +231,8 @@ class NftManager:
         counters: dict[int, dict[str, int]] = {}
         for item in payload.get("nftables", []):
             rule = item.get("rule", {})
-            # NAT chains only see the first packet of a connection. Use the
-            # forwarding-chain counters for byte-accurate traffic accounting.
+            # NAT chains only see the first packet of a connection. Account
+            # bytes in filter hooks at the server's ingress and egress paths.
             match = re.fullmatch(r"nfp:traffic-(in|out):(\d+)", rule.get("comment", ""))
             if not match:
                 continue
