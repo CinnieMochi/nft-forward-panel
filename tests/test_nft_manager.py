@@ -89,8 +89,10 @@ class ValidationTests(unittest.TestCase):
         output = chr(10).join((
             "tcp 6 431999 ESTABLISHED src=198.51.100.20 dst=192.0.2.10 sport=50000 dport=10110 "
             "src=141.11.219.150 dst=198.51.100.20 sport=19849 dport=50000 [ASSURED] mark=0 use=1",
-            "udp 17 29 src=198.51.100.21 dst=192.0.2.10 sport=50001 dport=10110 "
+            "ipv4 2 udp 17 29 src=198.51.100.21 dst=192.0.2.10 sport=50001 dport=10110 "
             "src=141.11.219.150 dst=198.51.100.21 sport=19849 dport=50001 mark=0 use=1",
+            "ipv4 2 tcp 6 14 TIME_WAIT src=198.51.100.22 dst=192.0.2.10 sport=50002 dport=10110 "
+            "src=141.11.219.150 dst=198.51.100.22 sport=19849 dport=50002 [ASSURED] mark=0 use=1",
         ))
         manager._run = lambda *args, **kwargs: CompletedProcess([], 0, output, "")
         self.assertEqual(manager.connection_counts(), {10110: 2})
