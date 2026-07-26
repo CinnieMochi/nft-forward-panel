@@ -231,18 +231,58 @@
     const empty = canvas.parentElement.querySelector(".chart-empty");
     empty.style.display = points.length ? "none" : "grid";
     if (!points.length) return;
+    const bars = document.querySelector('[data-chart-kind="traffic"]') !== null;
+    const availableWidth = Math.max(320, canvas.parentElement.clientWidth - 36);
+    canvas.style.width = bars ? `${Math.max(availableWidth, 74 + points.length * 52)}px` : "100%";
     const ratio = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     canvas.width = rect.width * ratio; canvas.height = rect.height * ratio;
     const ctx = canvas.getContext("2d"); ctx.scale(ratio, ratio);
-    const width = rect.width, height = rect.height, pad = {left: 55, right: 18, top: 18, bottom: 36};
+    const width = rect.width, height = rect.height, pad = {left: 58, right: 18, top: 18, bottom: 40};
+    const plotWidth = width - pad.left - pad.right;
+    const plotHeight = height - pad.top - pad.bottom;
     const max = Math.max(1, ...points.flatMap((point) => [Number(point.inbound), Number(point.outbound)]));
-    ctx.font = "11px system-ui"; ctx.strokeStyle = "#e8ebf0"; ctx.fillStyle = "#8a95a5"; ctx.lineWidth = 1;
-    for (let step = 0; step <= 4; step += 1) { const y = pad.top + (height - pad.top - pad.bottom) * step / 4; ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke(); ctx.fillText(formatBytes(max * (1 - step / 4), rates ? "/s" : ""), 0, y + 4); }
-    const plot = (key, color) => { ctx.beginPath(); points.forEach((point, index) => { const x = pad.left + (width - pad.left - pad.right) * index / Math.max(1, points.length - 1); const y = height - pad.bottom - (height - pad.top - pad.bottom) * Number(point[key]) / max; index ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); };
-    plot("inbound", "#1677ff"); plot("outbound", "#22b865");
-    const labelIndexes = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
-    labelIndexes.forEach((index) => { const x = pad.left + (width - pad.left - pad.right) * index / Math.max(1, points.length - 1); ctx.fillText(points[index].period, Math.min(x, width - 82), height - 10); });
+    ctx.font = "11px system-ui"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 1;
+    for (let step = 0; step <= 4; step += 1) {
+      const y = pad.top + plotHeight * step / 4;
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y);
+      ctx.strokeStyle = "#e8ebf0"; ctx.stroke();
+      ctx.fillStyle = "#8a95a5";
+      ctx.fillText(formatBytes(max * (1 - step / 4), rates ? "/s" : ""), 0, y + 4);
+    }
+    if (bars) {
+      const groupWidth = plotWidth / points.length;
+      const barWidth = Math.min(16, Math.max(6, groupWidth * 0.3));
+      points.forEach((point, index) => {
+        const center = pad.left + groupWidth * (index + 0.5);
+        [["inbound", "#1677ff", -barWidth], ["outbound", "#16a765", 0]].forEach(([key, color, offset]) => {
+          const barHeight = plotHeight * Number(point[key]) / max;
+          ctx.fillStyle = color;
+          ctx.fillRect(center + offset, height - pad.bottom - barHeight, barWidth, barHeight);
+        });
+        ctx.fillStyle = "#8a95a5";
+        ctx.textAlign = "center";
+        ctx.fillText(point.period, center, height - 12);
+      });
+      ctx.textAlign = "left";
+    } else {
+      const plot = (key, color) => {
+        ctx.beginPath();
+        points.forEach((point, index) => {
+          const x = pad.left + plotWidth * index / Math.max(1, points.length - 1);
+          const y = height - pad.bottom - plotHeight * Number(point[key]) / max;
+          index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        });
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+      };
+      plot("inbound", "#1677ff"); plot("outbound", "#16a765");
+      const labelIndexes = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
+      ctx.fillStyle = "#8a95a5";
+      labelIndexes.forEach((index) => {
+        const x = pad.left + plotWidth * index / Math.max(1, points.length - 1);
+        ctx.fillText(points[index].period, Math.min(x, width - 82), height - 10);
+      });
+    }
   }
 
   async function loadHistory(days = 7) {
