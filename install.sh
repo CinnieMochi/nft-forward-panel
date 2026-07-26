@@ -127,9 +127,20 @@ if [[ -z "$SOURCE_DIR" ]]; then
     log "downloading $REPOSITORY release $RELEASE_VERSION"
     curl -fL --retry 3 -o "$TEMP_DIR/$APP_NAME.tar.gz" "$release_url/$APP_NAME.tar.gz" \
         || die "release archive download failed; confirm the repository is public and has a published GitHub Release"
-    curl -fL --retry 3 -o "$TEMP_DIR/$APP_NAME.tar.gz.sha256" "$release_url/$APP_NAME.tar.gz.sha256" \
-        || die "release checksum download failed; confirm the Release workflow completed successfully"
-    (cd "$TEMP_DIR" && sha256sum -c "$APP_NAME.tar.gz.sha256")
+    if [[ "$RELEASE_VERSION" == "latest" ]]; then
+        release_api="https://api.github.com/repos/$REPOSITORY/releases/latest"
+    else
+        release_api="https://api.github.com/repos/$REPOSITORY/releases/tags/$RELEASE_VERSION"
+    fi
+    expected_digest=$(curl -fsSL "$release_api" | python3 -c \
+        'import json, sys; name=sys.argv[1]; data=json.load(sys.stdin); print(next((a.get("digest", "") for a in data.get("assets", []) if a.get("name") == name), ""))' \
+        "$APP_NAME.tar.gz")
+    [[ "$expected_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] \
+        || die "GitHub did not return a SHA-256 digest for the release archive"
+    actual_digest="sha256:$(sha256sum "$TEMP_DIR/$APP_NAME.tar.gz" | awk '{print $1}')"
+    [[ "$actual_digest" == "$expected_digest" ]] \
+        || die "release archive SHA-256 verification failed"
+    log "release archive SHA-256 verified"
     tar -xzf "$TEMP_DIR/$APP_NAME.tar.gz" -C "$TEMP_DIR"
     SOURCE_DIR="$TEMP_DIR/$APP_NAME"
     [[ -f "$SOURCE_DIR/app.py" && -f "$SOURCE_DIR/deploy/$APP_NAME.service" ]] || die "release archive has an unexpected layout"
