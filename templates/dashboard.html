@@ -3,7 +3,7 @@
 {% block content %}
 <section class="welcome-band">
   {% if user.avatar_filename %}<img class="avatar large avatar-image" src="{{ url_for('avatar_upload', filename=user.avatar_filename) }}" alt="{{ user.username }} 的头像">{% else %}<div class="avatar large">{{ user.username[0]|upper }}</div>{% endif %}
-  <div><h1>上午好，{{ user.username }}</h1><p><span class="role {{ user.role }}">{{ '管理员' if user.role == 'admin' else '普通用户' }}</span> 转发状态与用量实时概览</p></div><div class="welcome-meta"><span>规则数量</span><strong>{{ rules|length }}</strong></div>
+  <div><h1 data-time-greeting data-username="{{ user.username }}">你好，{{ user.username }}</h1><p><span class="role {{ user.role }}">{{ '管理员' if user.role == 'admin' else '普通用户' }}</span> 转发状态与用量实时概览</p></div><div class="welcome-meta"><span>规则数量</span><strong>{{ rules|length }}</strong></div>
 </section>
 
 <section class="metric-grid live-overview" data-overview-url="{{ url_for('overview_api') }}">
