@@ -18,3 +18,26 @@ body{background:var(--bg)}.sidebar,.topbar{background:rgba(255,255,255,.94);back
 
 /* Navigation, quota metadata, and semantic system health styling. */
 .sidebar,.sidebar nav,.sidebar-status{font-family:"Segoe UI Variable","HarmonyOS Sans SC","MiSans","PingFang SC","Microsoft YaHei UI",sans-serif}.brand{letter-spacing:0}.sidebar nav p{font-size:11px;letter-spacing:0;font-weight:650}.nav-link{font-size:14px;font-weight:600;letter-spacing:0}.nav-link span{font-family:"Segoe UI Symbol","Microsoft YaHei UI",sans-serif}.quota-panel{font-family:"Segoe UI Variable","HarmonyOS Sans SC","MiSans","PingFang SC","Microsoft YaHei UI",sans-serif}.quota-panel>p{color:#7b8798;font-size:12px;font-weight:600}.quota-panel>code,.quota-panel .entry-address code,.quota-panel .entry-empty{display:block;color:#344258;font-family:"Segoe UI Variable","HarmonyOS Sans SC","MiSans","PingFang SC","Microsoft YaHei UI",sans-serif;font-size:14px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:0}.quota-panel .entry-address code{display:inline}.system-state strong{transition:color .16s ease}.system-state.ok strong{color:var(--green)}.system-state.warn strong{color:var(--orange)}.system-state.bad strong{color:var(--red)}.system-state.ok .dot{box-shadow:0 0 0 3px var(--green-soft)}.system-state.warn .dot{box-shadow:0 0 0 3px var(--orange-soft)}.system-state.bad .dot{box-shadow:0 0 0 3px #fff0f2}
+
+/* Responsive interaction fixes kept last so they override the compact base sheet. */
+.sidebar-backdrop{display:none;border:0;padding:0;background:rgba(21,30,45,.42)}
+dialog{max-height:calc(100dvh - 24px);overflow:hidden}
+.dialog-card{display:flex;max-height:calc(100dvh - 24px);flex-direction:column}
+.dialog-card>.panel-heading,.dialog-actions{flex:0 0 auto}
+.dialog-body{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+@media(max-width:760px){body.mobile-nav-open{overflow:hidden}.sidebar{z-index:30;box-shadow:12px 0 30px rgba(21,30,45,.14)}.sidebar-backdrop{position:fixed;inset:0;z-index:25}body.mobile-nav-open .sidebar-backdrop{display:block}.topbar{z-index:20}.topbar>div:not(.account){min-width:0}.topbar>div:not(.account) strong{display:block;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.table-wrap{-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}.chart-wrap{height:280px}dialog{width:calc(100vw - 24px)}.dialog-card>.panel-heading{padding:12px 14px}.dialog-body{padding:16px}.dialog-actions{padding:12px 16px}}
+@media(max-width:440px){.page-heading>.button{width:100%}.segmented{width:100%}.segmented button{flex:1;white-space:nowrap}.profile-avatar-row{align-items:flex-start;flex-direction:column}.profile-avatar-row label{width:100%}.dialog-actions .button{flex:1}}
+
+/* SVG gauges avoid inline styles so the strict style-src CSP remains effective. */
+.bandwidth-gauge{background:none}
+.bandwidth-gauge:before{display:none}
+.bandwidth-gauge svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(128deg);overflow:visible}
+.bandwidth-gauge circle{fill:none;stroke-width:7;stroke-linecap:round;stroke-dashoffset:0}
+.bandwidth-gauge .gauge-track{stroke:#e7ebf1;stroke-dasharray:70 100}
+.bandwidth-gauge .gauge-value{stroke:var(--green);stroke-dasharray:0 100;transition:stroke-dasharray .18s ease,stroke .18s ease}
+.bandwidth-gauge.gauge-green .gauge-value{stroke:var(--green)}
+.bandwidth-gauge.gauge-orange .gauge-value{stroke:var(--orange)}
+.bandwidth-gauge.gauge-red .gauge-value{stroke:var(--red)}
+.bandwidth-gauge.gauge-green .bandwidth-gauge-copy b,.bandwidth-gauge.gauge-green .bandwidth-gauge-copy small{color:var(--green)}
+.bandwidth-gauge.gauge-orange .bandwidth-gauge-copy b,.bandwidth-gauge.gauge-orange .bandwidth-gauge-copy small{color:var(--orange)}
+.bandwidth-gauge.gauge-red .bandwidth-gauge-copy b,.bandwidth-gauge.gauge-red .bandwidth-gauge-copy small{color:var(--red)}
