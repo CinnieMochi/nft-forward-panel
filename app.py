@@ -276,7 +276,9 @@ def init_schema(app: Flask) -> None:
                 rule_id INTEGER PRIMARY KEY REFERENCES forward_rules(id) ON DELETE CASCADE,
                 inbound_bytes INTEGER NOT NULL DEFAULT 0,
                 outbound_bytes INTEGER NOT NULL DEFAULT 0,
-                sampled_at TEXT NOT NULL
+                sampled_at TEXT NOT NULL,
+                inbound_bps REAL NOT NULL DEFAULT 0,
+                outbound_bps REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS traffic_buckets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +328,13 @@ def init_schema(app: Flask) -> None:
             "paused_reason": "ALTER TABLE forward_rules ADD COLUMN paused_reason TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in rule_columns:
+                connection.execute(sql)
+        counter_columns = {row[1] for row in connection.execute("PRAGMA table_info(rule_counter_state)")}
+        for name, sql in {
+            "inbound_bps": "ALTER TABLE rule_counter_state ADD COLUMN inbound_bps REAL NOT NULL DEFAULT 0",
+            "outbound_bps": "ALTER TABLE rule_counter_state ADD COLUMN outbound_bps REAL NOT NULL DEFAULT 0",
+        }.items():
+            if name not in counter_columns:
                 connection.execute(sql)
         count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
