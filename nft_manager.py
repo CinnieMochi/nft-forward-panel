@@ -215,7 +215,9 @@ class NftManager:
         counters: dict[int, dict[str, int]] = {}
         for item in payload.get("nftables", []):
             rule = item.get("rule", {})
-            match = re.fullmatch(r"nfp:(in|out):(\d+)", rule.get("comment", ""))
+            # NAT chains only see the first packet of a connection. Use the
+            # forwarding-chain counters for byte-accurate traffic accounting.
+            match = re.fullmatch(r"nfp:(forward-in|out):(\d+)", rule.get("comment", ""))
             if not match:
                 continue
             direction, raw_port = match.groups()
@@ -225,19 +227,27 @@ class NftManager:
             )
             port = int(raw_port)
             counters.setdefault(port, {"inbound": 0, "outbound": 0})
-            counters[port]["inbound" if direction == "in" else "outbound"] += total
+            counters[port]["inbound" if direction == "forward-in" else "outbound"] += total
         return counters
 
     def connection_counts(self) -> dict[int, int]:
         """Count tracked TCP/UDP flows by original local destination port."""
         if not shutil.which("conntrack"):
             return {}
-        result = self._run(["conntrack", "-L", "-o", "extended"], check=False)
+        result = self._run(["conntrack", "-L", "-f", "ipv4", "-o", "extended"], check=False)
         if result.returncode not in (0, 1):
             return {}
         counts: dict[int, int] = {}
         for line in result.stdout.splitlines():
-            match = re.search(r"\bdport=(\d+)\b", line)
+            if not re.match(r"^(tcp|udp)\s", line):
+                continue
+            # The first tuple is the original direction, before DNAT. Its
+            # destination port is the panel's local listening port.
+            tuples = line.split("src=", 2)
+            if len(tuples) < 2:
+                continue
+            original = tuples[1]
+            match = re.search(r"\bdport=(\d+)\b", original)
             if match:
                 port = int(match.group(1))
                 counts[port] = counts.get(port, 0) + 1
