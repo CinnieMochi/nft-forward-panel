@@ -114,6 +114,58 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         reconcile.assert_called_once_with(self.web, force_apply=True)
 
+    def test_rule_delete_requires_explicit_confirmation(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        token = csrf_token(admin.get("/"))
+        response = admin.post("/rules/999/delete", data={"csrf_token": token})
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_can_edit_rule_owner(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            admin_id = connection.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+            cursor = connection.execute(
+                """INSERT INTO forward_rules
+                   (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps,
+                    outbound_limit_mbps, paused_reason, created_at)
+                   VALUES (10110, '8.8.8.8', 443, ?, 0, 0, '', '2026-01-01 00:00:00 UTC')""",
+                (admin_id,),
+            )
+            rule_id = cursor.lastrowid
+            connection.commit()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/"))
+        with (
+            patch("app.NftManager.apply_rules"),
+            patch("app.NftManager.listening_port_in_use", return_value=False),
+            patch("app.NftManager.firewall_open", return_value=[]),
+            patch("app.NftManager.firewall_close", return_value=[]),
+        ):
+            response = admin.post(f"/rules/{rule_id}/edit", data={
+                "csrf_token": token,
+                "listen_port": "10111",
+                "destination_ip": "1.1.1.1",
+                "destination_port": "8443",
+                "owner_id": str(member_id),
+                "inbound_limit_mbps": "20",
+                "outbound_limit_mbps": "10",
+            })
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            row = connection.execute(
+                "SELECT listen_port, destination_ip, destination_port, owner_id FROM forward_rules WHERE id=?",
+                (rule_id,),
+            ).fetchone()
+            self.assertEqual(row, (10111, "1.1.1.1", 8443, member_id))
+        finally:
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()
