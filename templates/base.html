@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Mochi Forward{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</head>
+<body>
+  {% if user %}
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-mark">M</span><span>Mochi<small>Forward Console</small></span></a>
+    <nav aria-label="主导航">
+      <p>转发</p>
+      <a class="nav-link" href="{{ url_for('dashboard') }}"><span>◫</span>概览与规则</a>
+      <a class="nav-link" href="{{ url_for('analytics', kind='bandwidth') }}"><span>↕</span>带宽记录</a>
+      <a class="nav-link" href="{{ url_for('analytics', kind='traffic') }}"><span>▥</span>流量统计</a>
+      <a class="nav-link" href="{{ url_for('analytics', kind='connections') }}"><span>⌁</span>连接统计</a>
+      {% if user.role == 'admin' %}
+      <p>管理</p>
+      <a class="nav-link" href="{{ url_for('users') }}"><span>◎</span>用户与策略</a>
+      <a class="nav-link" href="{{ url_for('audit') }}"><span>≡</span>操作审计</a>
+      {% endif %}
+      <p>账户</p>
+      <a class="nav-link" href="{{ url_for('profile') }}"><span>◇</span>个人信息</a>
+    </nav>
+    <div class="sidebar-status"><i></i> 控制台运行中</div>
+  </aside>
+  <header class="topbar">
+    <button class="icon-button menu-toggle" type="button" aria-label="收起导航" aria-controls="sidebar" aria-expanded="true" title="收起导航">☰</button>
+    <div><span class="top-kicker">控制台</span><strong>{% block page_name %}概览{% endblock %}</strong></div>
+    <div class="account">
+      {% if user.avatar_filename %}<img class="avatar avatar-image" src="{{ url_for('avatar_upload', filename=user.avatar_filename) }}" alt="{{ user.username }} 的头像">{% else %}<span class="avatar">{{ user.username[0]|upper }}</span>{% endif %}
+      <span><b>{{ user.username }}</b><small>{{ '管理员' if user.role == 'admin' else '普通用户' }}</small></span>
+      <form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="icon-button" title="退出登录" aria-label="退出登录" type="submit">↪</button></form>
+    </div>
+  </header>
+  {% endif %}
+  <main class="{% block main_class %}shell{% endblock %}">
+    {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<div class="notice {{ category }}" role="alert">{{ message }}</div>{% endfor %}{% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

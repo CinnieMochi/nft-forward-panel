@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          PANEL_SECRET_KEY: github-actions-test-secret
+          PANEL_ADMIN_USERNAME: admin
+          PANEL_ADMIN_PASSWORD: GitHubActionsOnly2026
+          PANEL_DATA_DIR: /tmp/nft-forward-panel-tests
+          PANEL_COOKIE_SECURE: "0"
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
+
+      - name: Check installer syntax
+        run: bash -n install.sh
+
+      - name: Build release archive
+        run: |
+          mkdir -p dist/nft-forward-panel
+          rsync -a ./ dist/nft-forward-panel/ \
+            --exclude .git --exclude .github --exclude dist \
+            --exclude .venv --exclude .preview-data \
+            --exclude __pycache__ --exclude '*.pyc' --exclude '*.db*'
+          tar -C dist -czf dist/nft-forward-panel.tar.gz nft-forward-panel
+          cd dist
+          sha256sum nft-forward-panel.tar.gz > nft-forward-panel.tar.gz.sha256
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nft-forward-panel.tar.gz
+            dist/nft-forward-panel.tar.gz.sha256
+          generate_release_notes: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nft-forward-panel-${{ github.sha }}
+          path: |
+            dist/nft-forward-panel.tar.gz
+            dist/nft-forward-panel.tar.gz.sha256

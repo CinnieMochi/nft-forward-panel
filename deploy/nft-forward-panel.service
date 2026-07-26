@@ -1,0 +1,22 @@
+[Unit]
+Description=nftables Port Forwarding Web Panel
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/nft-forward-panel
+EnvironmentFile=/etc/nft-forward-panel.env
+ExecStart=/opt/nft-forward-panel/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8108 --access-logfile - --error-logfile - wsgi:app
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/nftables.d /etc/nftables.conf /etc/sysctl.d /var/lib/nft-forward-panel
+
+[Install]
+WantedBy=multi-user.target

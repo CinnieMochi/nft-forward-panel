@@ -1,0 +1,11 @@
+.venv/
+.preview-data/
+__pycache__/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+*.tar.gz
+*.sha256
+.pytest_cache/
+dist/

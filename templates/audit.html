@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block title %}审计 · 端口转发面板{% endblock %}
+{% block content %}
+<section class="page-heading"><div><p class="eyebrow">AUDIT LOG</p><h1>操作审计</h1><p class="muted">显示最近 300 条记录，时间统一为 UTC。</p></div></section>
+<section class="card rules-card"><div class="table-wrap"><table>
+  <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th><th>来源 IP</th></tr></thead>
+  <tbody>{% for event in events %}<tr><td class="date">{{ event.created_at }}</td><td>{{ event.actor_name }}</td><td><code>{{ event.action }}</code></td><td>{{ event.target }}</td><td class="details">{{ event.details }}</td><td><code>{{ event.remote_addr }}</code></td></tr>{% endfor %}</tbody>
+</table></div></section>
+{% endblock %}
