@@ -100,7 +100,7 @@ fi
 log "installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gpg openssl nftables python3 python3-venv sqlite3
+apt-get install -y ca-certificates conntrack curl gpg openssl nftables python3 python3-venv sqlite3
 if ! command -v caddy >/dev/null; then
     if ! apt-get install -y caddy; then
         log "enabling the official Caddy package repository"
