@@ -17,7 +17,13 @@
   };
 
   const gaugeState = new WeakMap();
-  const gaugeColor = (mbps) => (mbps <= 100 ? "var(--green)" : (mbps <= 300 ? "var(--orange)" : "var(--red)"));
+  const gaugeTone = (value, low, medium) => (value <= low ? "gauge-green" : (value <= medium ? "gauge-orange" : "gauge-red"));
+  const paintGauge = (gauge, progress, tone) => {
+    gauge.classList.remove("gauge-green", "gauge-orange", "gauge-red");
+    gauge.classList.add(tone);
+    const arc = gauge.querySelector(".gauge-value");
+    if (arc) arc.setAttribute("stroke-dasharray", `${(Math.min(1, Math.max(0, progress)) * 70).toFixed(2)} 100`);
+  };
   const formatMbps = (mbps) => {
     if (mbps >= 100) return Math.round(mbps).toString();
     if (mbps >= 10) return mbps.toFixed(1).replace(/\.0$/, "");
@@ -36,8 +42,7 @@
       const eased = 1 - Math.pow(1 - ratio, 3);
       const value = previous + (target - previous) * eased;
       const progress = Math.min(1, value / 500);
-      gauge.style.setProperty("--gauge-progress", progress.toFixed(4));
-      gauge.style.setProperty("--gauge-color", gaugeColor(value));
+      paintGauge(gauge, progress, gaugeTone(value, 100, 300));
       if (label) label.textContent = formatMbps(value);
       gauge.setAttribute("aria-label", `${kind === "inbound" ? "实时入站带宽" : "实时出站带宽"} ${formatMbps(value)} Mbps`);
       if (ratio < 1) requestAnimationFrame(paint);
@@ -61,6 +66,9 @@
     document.getElementById(button.dataset.dialogOpen)?.showModal();
   }));
   document.querySelectorAll("[data-dialog-close]").forEach((button) => button.addEventListener("click", () => button.closest("dialog")?.close()));
+  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  }));
   document.querySelectorAll("[data-copy-address], [data-copy-text]").forEach((button) => button.addEventListener("click", async () => {
     const text = button.dataset.copyText || button.dataset.copyAddress || "";
     if (!text) return;
@@ -84,11 +92,17 @@
   }));
 
   const sidebar = document.querySelector(".sidebar");
+  const sidebarBackdrop = document.querySelector(".sidebar-backdrop");
   const menuToggle = document.querySelector(".menu-toggle");
   const desktopSidebar = window.matchMedia("(min-width: 761px)");
+  const closeMobileSidebar = () => {
+    sidebar?.classList.remove("open");
+    document.body.classList.remove("mobile-nav-open");
+    menuToggle?.setAttribute("aria-expanded", "false");
+  };
   const applySidebar = (collapsed) => {
     document.body.classList.toggle("sidebar-collapsed", collapsed);
-    sidebar?.classList.toggle("open", !collapsed || !desktopSidebar.matches);
+    closeMobileSidebar();
     menuToggle?.setAttribute("aria-expanded", String(!collapsed));
     menuToggle?.setAttribute("aria-label", collapsed ? "展开导航" : "收起导航");
     menuToggle?.setAttribute("title", collapsed ? "展开导航" : "收起导航");
@@ -96,17 +110,25 @@
   if (sidebar && menuToggle) {
     const saved = window.localStorage.getItem("mochi-sidebar-collapsed") === "1";
     if (desktopSidebar.matches) applySidebar(saved);
+    else closeMobileSidebar();
     menuToggle.addEventListener("click", () => {
       if (desktopSidebar.matches) {
         const next = !document.body.classList.contains("sidebar-collapsed");
         window.localStorage.setItem("mochi-sidebar-collapsed", next ? "1" : "0");
         applySidebar(next);
       } else {
-        sidebar.classList.toggle("open");
-        menuToggle.setAttribute("aria-expanded", String(sidebar.classList.contains("open")));
+        const open = !sidebar.classList.contains("open");
+        sidebar.classList.toggle("open", open);
+        document.body.classList.toggle("mobile-nav-open", open);
+        menuToggle.setAttribute("aria-expanded", String(open));
       }
     });
-    desktopSidebar.addEventListener("change", () => applySidebar(window.localStorage.getItem("mochi-sidebar-collapsed") === "1"));
+    sidebarBackdrop?.addEventListener("click", closeMobileSidebar);
+    sidebar.querySelectorAll("a").forEach((link) => link.addEventListener("click", closeMobileSidebar));
+    desktopSidebar.addEventListener("change", () => {
+      if (desktopSidebar.matches) applySidebar(window.localStorage.getItem("mochi-sidebar-collapsed") === "1");
+      else closeMobileSidebar();
+    });
   }
 
   const overview = document.querySelector(".live-overview");
@@ -148,18 +170,15 @@
     const label = gauge.querySelector("b");
     if (!quota) {
       detail.textContent = `${formatBytes(usage)} / 不限额`;
-      gauge.style.setProperty("--gauge-progress", "0");
-      gauge.style.setProperty("--gauge-color", "var(--green)");
+      paintGauge(gauge, 0, "gauge-green");
       if (label) label.textContent = "--";
       gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，不限额`);
       return;
     }
     const percentage = usage / quota * 100;
     const displayed = Math.min(100, Math.max(0, percentage));
-    const color = percentage <= 50 ? "var(--green)" : (percentage <= 80 ? "var(--orange)" : "var(--red)");
     detail.textContent = `${formatBytes(usage)} / ${formatBytes(quota)}`;
-    gauge.style.setProperty("--gauge-progress", (displayed / 100).toFixed(4));
-    gauge.style.setProperty("--gauge-color", color);
+    paintGauge(gauge, displayed / 100, gaugeTone(percentage, 50, 80));
     if (label) label.textContent = Math.round(displayed).toString();
     gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，总额 ${formatBytes(quota)}，已用 ${percentage.toFixed(1)}%`);
   };
