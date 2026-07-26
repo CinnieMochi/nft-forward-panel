@@ -37,6 +37,16 @@
     requestAnimationFrame(paint);
   };
 
+  const updateTimeGreeting = () => {
+    const hour = new Date().getHours();
+    const greeting = hour < 5 ? "凌晨了，快睡吧" : hour < 11 ? "早上好" : hour < 13 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
+    document.querySelectorAll("[data-time-greeting]").forEach((node) => {
+      node.textContent = `${greeting}，${node.dataset.username || ""}`;
+    });
+  };
+  updateTimeGreeting();
+  window.setInterval(updateTimeGreeting, 60_000);
+
   document.querySelectorAll("[data-bytes]").forEach((node) => { node.textContent = formatBytes(node.dataset.bytes); });
   document.querySelectorAll("[data-dialog-open]").forEach((button) => button.addEventListener("click", () => {
     document.getElementById(button.dataset.dialogOpen)?.showModal();
