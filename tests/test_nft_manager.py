@@ -42,6 +42,24 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertNotIn('comment "nfp:in:10110" dnat', rendered)
 
+    def test_forward_counters_have_typed_protocol_and_trailing_comment(self):
+        manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
+        manager.local_ipv4 = lambda: "192.0.2.10"
+        rendered = manager._render_config([
+            ForwardRule(None, 10110, "141.11.219.150", 19849, inbound_limit_mbps=8),
+        ])
+        self.assertIn(
+            'ct direction original ct original protocol tcp ct original proto-dst 10110 '
+            'counter limit rate over 1000 kbytes/second drop comment "nfp:forward-in:10110"',
+            rendered,
+        )
+        self.assertIn(
+            'ct direction reply ct original protocol udp ct original proto-dst 10110 '
+            'counter comment "nfp:out:10110"',
+            rendered,
+        )
+        self.assertNotIn('comment "nfp:forward-in:10110" limit', rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
