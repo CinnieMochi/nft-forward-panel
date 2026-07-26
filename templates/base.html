@@ -6,6 +6,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>{% block title %}Mochi Forward{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <script src="{{ url_for('static', filename='vendor/twemoji/twemoji.min.js') }}" defer></script>
   <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
 </head>
 <body>
