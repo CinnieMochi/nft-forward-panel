@@ -45,22 +45,28 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertNotIn('comment "nfp:nat:10110" dnat', rendered)
 
-    def test_forward_counters_have_typed_protocol_and_trailing_comment(self):
+    def test_traffic_counters_use_interface_hooks_and_limits_stay_directional(self):
         manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
         manager.local_ipv4 = lambda: "192.0.2.10"
         rendered = manager._render_config([
             ForwardRule(None, 10110, "141.11.219.150", 19849, inbound_limit_mbps=8),
         ])
+        self.assertIn("type filter hook prerouting priority 0; policy accept;", rendered)
+        self.assertIn("type filter hook postrouting priority 0; policy accept;", rendered)
         self.assertIn(
-            'ip saddr 141.11.219.150 tcp sport 19849 ct status dnat '
-            'ct original protocol tcp ct original proto-dst 10110 counter '
-            'limit rate over 1000 kbytes/second drop comment "nfp:traffic-in:10110"',
+            'ct status dnat ct original protocol tcp ct original proto-dst 10110 '
+            'counter comment "nfp:traffic-in:10110"',
             rendered,
         )
         self.assertIn(
-            'ip daddr 141.11.219.150 udp dport 19849 ct status dnat '
-            'ct original protocol udp ct original proto-dst 10110 counter '
-            'comment "nfp:traffic-out:10110"',
+            'ct status dnat ct original protocol udp ct original proto-dst 10110 '
+            'counter comment "nfp:traffic-out:10110"',
+            rendered,
+        )
+        self.assertIn(
+            'ip saddr 141.11.219.150 tcp sport 19849 ct status dnat '
+            'ct original protocol tcp ct original proto-dst 10110 counter '
+            'limit rate over 1000 kbytes/second drop comment "nfp:limit-in:10110"',
             rendered,
         )
         self.assertNotIn('comment "nfp:traffic-in:10110" limit', rendered)
