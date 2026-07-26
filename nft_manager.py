@@ -161,8 +161,8 @@ class NftManager:
                 [
                     "",
                     f"        # Forward {rule.listen_port} -> {rule.destination_ip}:{rule.destination_port}",
-                    f'        tcp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:in:{rule.listen_port}"',
-                    f'        udp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:in:{rule.listen_port}"',
+                    f'        tcp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:nat:{rule.listen_port}"',
+                    f'        udp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:nat:{rule.listen_port}"',
                 ]
             )
         lines.extend(
@@ -195,8 +195,8 @@ class NftManager:
             lines.append("")
             for protocol in ("tcp", "udp"):
                 lines.extend([
-                    f'        ct direction original ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:forward-in:{rule.listen_port}"',
-                    f'        ct direction reply ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:out:{rule.listen_port}"',
+                    f'        ct direction original ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
+                    f'        ct direction reply ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
                 ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
@@ -217,7 +217,7 @@ class NftManager:
             rule = item.get("rule", {})
             # NAT chains only see the first packet of a connection. Use the
             # forwarding-chain counters for byte-accurate traffic accounting.
-            match = re.fullmatch(r"nfp:(forward-in|out):(\d+)", rule.get("comment", ""))
+            match = re.fullmatch(r"nfp:traffic-(in|out):(\d+)", rule.get("comment", ""))
             if not match:
                 continue
             direction, raw_port = match.groups()
@@ -227,7 +227,7 @@ class NftManager:
             )
             port = int(raw_port)
             counters.setdefault(port, {"inbound": 0, "outbound": 0})
-            counters[port]["inbound" if direction == "forward-in" else "outbound"] += total
+            counters[port]["inbound" if direction == "in" else "outbound"] += total
         return counters
 
     def connection_counts(self) -> dict[int, int]:
