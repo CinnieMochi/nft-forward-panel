@@ -124,21 +124,25 @@
     const quota = Number(totals.monthly_quota_bytes) || 0;
     const usage = Math.max(0, Number(totals.monthly_bytes) || 0);
     const detail = document.querySelector('[data-metric="monthly-detail"]');
-    const progress = document.querySelector("[data-monthly-progress]");
-    if (!detail || !progress) return;
+    const gauge = document.querySelector("[data-monthly-progress]");
+    if (!detail || !gauge) return;
+    const label = gauge.querySelector("b");
     if (!quota) {
       detail.textContent = `${formatBytes(usage)} / 不限额`;
-      progress.hidden = true;
+      gauge.style.setProperty("--gauge-progress", "0");
+      gauge.style.setProperty("--gauge-color", "var(--green)");
+      if (label) label.textContent = "--";
+      gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，不限额`);
       return;
     }
     const percentage = usage / quota * 100;
-    const percent = Math.min(100, percentage);
-    const state = percentage <= 50 ? "low" : (percentage <= 80 ? "medium" : "high");
+    const displayed = Math.min(100, Math.max(0, percentage));
+    const color = percentage <= 50 ? "var(--green)" : (percentage <= 80 ? "var(--orange)" : "var(--red)");
     detail.textContent = `${formatBytes(usage)} / ${formatBytes(quota)}`;
-    progress.hidden = false;
-    progress.firstElementChild.style.width = `${percent}%`;
-    progress.className = `metric-progress ${state}`;
-    progress.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，总额 ${formatBytes(quota)}，已用 ${percentage.toFixed(1)}%`);
+    gauge.style.setProperty("--gauge-progress", (displayed / 100).toFixed(4));
+    gauge.style.setProperty("--gauge-color", color);
+    if (label) label.textContent = Math.round(displayed).toString();
+    gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，总额 ${formatBytes(quota)}，已用 ${percentage.toFixed(1)}%`);
   };
   async function loadOverview() {
     if (!overview || overviewBusy) return;
