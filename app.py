@@ -174,6 +174,15 @@ def validate_email(value: str) -> str:
     return value
 
 
+def validate_rule_note(value: str) -> str:
+    value = value.strip()
+    if len(value) > 80:
+        raise ValueError("规则备注最多 80 个字符。")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("规则备注不能包含换行或控制字符。")
+    return value
+
+
 def account_identifier_conflicts(connection: sqlite3.Connection, username: str, email: str, excluded_id: int | None = None) -> bool:
     sql = "SELECT 1 FROM users WHERE (username COLLATE NOCASE IN (?, ?) OR email COLLATE NOCASE IN (?, ?))"
     params: list[Any] = [username, email, username, email]
@@ -326,6 +335,7 @@ def init_schema(app: Flask) -> None:
             "inbound_limit_mbps": "ALTER TABLE forward_rules ADD COLUMN inbound_limit_mbps INTEGER NOT NULL DEFAULT 0",
             "outbound_limit_mbps": "ALTER TABLE forward_rules ADD COLUMN outbound_limit_mbps INTEGER NOT NULL DEFAULT 0",
             "paused_reason": "ALTER TABLE forward_rules ADD COLUMN paused_reason TEXT NOT NULL DEFAULT ''",
+            "note": "ALTER TABLE forward_rules ADD COLUMN note TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in rule_columns:
                 connection.execute(sql)
@@ -675,6 +685,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             initial_pause = desired_pause_reason(owner, owner_usage)
             if not 0 <= inbound_limit <= 100000 or not 0 <= outbound_limit <= 100000:
                 raise NftOperationError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
+            note = validate_rule_note(request.form.get("note", ""))
             new_rule = ForwardRule(
                 id=None,
                 listen_port=listen_port,
@@ -697,11 +708,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     candidates.append(new_rule)
                 manager.apply_rules(candidates)
                 cursor = connection.execute(
-                    "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, paused_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (new_rule.listen_port, new_rule.destination_ip, new_rule.destination_port, owner_id, inbound_limit, outbound_limit, initial_pause, now()),
+                    "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, paused_reason, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_rule.listen_port, new_rule.destination_ip, new_rule.destination_port, owner_id, inbound_limit, outbound_limit, initial_pause, note, now()),
                 )
                 warnings = manager.firewall_open(new_rule) if not initial_pause else []
-                add_audit("rule_create", str(cursor.lastrowid), f"{new_rule.listen_port} → {new_rule.destination_ip}:{new_rule.destination_port}; owner={owner['username']}; paused={initial_pause or 'no'}; {'; '.join(warnings)}")
+                add_audit("rule_create", str(cursor.lastrowid), f"{new_rule.listen_port} → {new_rule.destination_ip}:{new_rule.destination_port}; owner={owner['username']}; note={note or '(empty)'}; paused={initial_pause or 'no'}; {'; '.join(warnings)}")
                 connection.commit()
             if initial_pause:
                 flash(f"端口转发已保存，但该用户{pause_label(initial_pause)}，规则暂不加载。", "success")
@@ -751,6 +762,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     outbound_limit = int(owner["default_outbound_mbps"])
                 if not 0 <= inbound_limit <= 100000 or not 0 <= outbound_limit <= 100000:
                     raise NftOperationError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
+                note = validate_rule_note(request.form.get("note", ""))
                 updated = ForwardRule(
                     id=rule_id,
                     listen_port=listen_port,
@@ -770,9 +782,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 previous = row_to_rule(current)
                 connection.execute(
                     """UPDATE forward_rules SET listen_port=?, destination_ip=?, destination_port=?, owner_id=?,
-                       inbound_limit_mbps=?, outbound_limit_mbps=?, paused_reason=? WHERE id=?""",
+                       inbound_limit_mbps=?, outbound_limit_mbps=?, paused_reason=?, note=? WHERE id=?""",
                     (listen_port, updated.destination_ip, updated.destination_port, owner_id,
-                     inbound_limit, outbound_limit, pause_reason, rule_id),
+                     inbound_limit, outbound_limit, pause_reason, note, rule_id),
                 )
                 connection.execute("DELETE FROM rule_counter_state WHERE rule_id=?", (rule_id,))
                 warnings = manager.firewall_open(updated) if not pause_reason else []
@@ -786,7 +798,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     "rule_update", str(rule_id),
                     f"{previous.listen_port} → {previous.destination_ip}:{previous.destination_port}; "
                     f"updated={updated.listen_port} → {updated.destination_ip}:{updated.destination_port}; "
-                    f"owner={owner['username']}; paused={pause_reason or 'no'}; {'; '.join(warnings)}",
+                    f"owner={owner['username']}; note={note or '(empty)'}; paused={pause_reason or 'no'}; {'; '.join(warnings)}",
                 )
                 connection.commit()
             flash("转发规则已修改并重新加载。" + (" " + " ".join(warnings) if warnings else ""), "success")
