@@ -89,6 +89,7 @@ class TrafficMonitor:
                     """INSERT INTO traffic_buckets(rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
                        VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(rule_id, bucket_at) DO UPDATE SET
+                       owner_id=excluded.owner_id,
                        inbound_bytes=inbound_bytes+excluded.inbound_bytes,
                        outbound_bytes=outbound_bytes+excluded.outbound_bytes""",
                     (rule_id, int(rule["owner_id"]), bucket, delta_in, delta_out),
