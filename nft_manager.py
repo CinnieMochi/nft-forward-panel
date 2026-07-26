@@ -161,8 +161,8 @@ class NftManager:
                 [
                     "",
                     f"        # Forward {rule.listen_port} -> {rule.destination_ip}:{rule.destination_port}",
-                    f'        tcp dport {rule.listen_port} counter comment "nfp:in:{rule.listen_port}" dnat to {rule.destination_ip}:{rule.destination_port}',
-                    f'        udp dport {rule.listen_port} counter comment "nfp:in:{rule.listen_port}" dnat to {rule.destination_ip}:{rule.destination_port}',
+                    f'        tcp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:in:{rule.listen_port}"',
+                    f'        udp dport {rule.listen_port} counter dnat to {rule.destination_ip}:{rule.destination_port} comment "nfp:in:{rule.listen_port}"',
                 ]
             )
         lines.extend(
