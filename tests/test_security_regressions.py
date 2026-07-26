@@ -11,7 +11,7 @@ os.environ.setdefault("PANEL_ADMIN_PASSWORD", "PreviewOnly!2026")
 os.environ.setdefault("PANEL_SECRET_KEY", "test-secret")
 os.environ.setdefault("PANEL_DATA_DIR", tempfile.mkdtemp(prefix="security-import-"))
 
-from app import create_app, desired_pause_reason
+from app import create_app, desired_pause_reason, validate_rule_note
 from werkzeug.security import generate_password_hash
 
 
@@ -114,12 +114,72 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         reconcile.assert_called_once_with(self.web, force_apply=True)
 
+    def test_rule_note_validation(self):
+        self.assertEqual(validate_rule_note("  香港入口  "), "香港入口")
+        self.assertEqual(validate_rule_note("🇨🇳 中国入口 🚀"), "🇨🇳 中国入口 🚀")
+        with self.assertRaises(ValueError):
+            validate_rule_note("x" * 81)
+        with self.assertRaises(ValueError):
+            validate_rule_note("第一行" + chr(10) + "第二行")
+
+    def test_rule_note_column_is_initialized(self):
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(forward_rules)")}
+            self.assertIn("note", columns)
+        finally:
+            connection.close()
+
     def test_rule_delete_requires_explicit_confirmation(self):
         admin = self.web.test_client()
         self.login(admin, "admin", "PreviewOnly!2026")
         token = csrf_token(admin.get("/"))
         response = admin.post("/rules/999/delete", data={"csrf_token": token})
         self.assertEqual(response.status_code, 400)
+
+    def test_invalid_policy_numbers_do_not_return_500(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        for quota in ("nan", "inf", "1e9999"):
+            response = admin.post(f"/users/{member_id}/policy", data={
+                "csrf_token": token, "max_rules": "10", "port_min": "1024", "port_max": "65535",
+                "default_inbound_mbps": "0", "default_outbound_mbps": "0",
+                "monthly_quota_gib": quota, "monthly_reset_day": "1", "monthly_reset_time": "00:00",
+                "entry_address": "",
+            })
+            self.assertEqual(response.status_code, 302)
+
+    def test_policy_database_is_restored_when_nft_reload_fails(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+            before = connection.execute("SELECT max_rules, default_inbound_mbps FROM users WHERE id=?", (member_id,)).fetchone()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        from nft_manager import NftOperationError
+        with patch("app.reconcile_rule_state", side_effect=[NftOperationError("reload failed"), None]):
+            response = admin.post(f"/users/{member_id}/policy", data={
+                "csrf_token": token, "max_rules": "99", "port_min": "1024", "port_max": "65535",
+                "default_inbound_mbps": "100", "default_outbound_mbps": "50",
+                "monthly_quota_gib": "20", "monthly_reset_day": "1", "monthly_reset_time": "00:00",
+                "entry_address": "203.0.113.10",
+            })
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            after = connection.execute("SELECT max_rules, default_inbound_mbps FROM users WHERE id=?", (member_id,)).fetchone()
+            self.assertEqual(after, before)
+        finally:
+            connection.close()
 
     def test_admin_can_edit_rule_owner(self):
         admin = self.web.test_client()
@@ -144,7 +204,7 @@ class SecurityRegressionTests(unittest.TestCase):
             patch("app.NftManager.apply_rules"),
             patch("app.NftManager.listening_port_in_use", return_value=False),
             patch("app.NftManager.firewall_open", return_value=[]),
-            patch("app.NftManager.firewall_close", return_value=[]),
+            patch("app.NftManager.firewall_close", return_value=[]) as close_firewall,
         ):
             response = admin.post(f"/rules/{rule_id}/edit", data={
                 "csrf_token": token,
@@ -154,15 +214,17 @@ class SecurityRegressionTests(unittest.TestCase):
                 "owner_id": str(member_id),
                 "inbound_limit_mbps": "20",
                 "outbound_limit_mbps": "10",
+                "note": "香港入口",
             })
         self.assertEqual(response.status_code, 302)
+        close_firewall.assert_called_once()
         connection = sqlite3.connect(self.web.config["DATABASE"])
         try:
             row = connection.execute(
-                "SELECT listen_port, destination_ip, destination_port, owner_id FROM forward_rules WHERE id=?",
+                "SELECT listen_port, destination_ip, destination_port, owner_id, note FROM forward_rules WHERE id=?",
                 (rule_id,),
             ).fetchone()
-            self.assertEqual(row, (10111, "1.1.1.1", 8443, member_id))
+            self.assertEqual(row, (10111, "1.1.1.1", 8443, member_id, "香港入口"))
         finally:
             connection.close()
 
