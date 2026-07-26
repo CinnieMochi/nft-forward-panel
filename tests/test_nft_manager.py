@@ -1,4 +1,7 @@
+import json
 import unittest
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from nft_manager import ForwardRule, NftManager, NftOperationError
 
@@ -37,10 +40,10 @@ class ValidationTests(unittest.TestCase):
             ForwardRule(None, 10110, "141.11.219.150", 19849),
         ])
         self.assertIn(
-            'tcp dport 10110 counter dnat to 141.11.219.150:19849 comment "nfp:in:10110"',
+            'tcp dport 10110 counter dnat to 141.11.219.150:19849 comment "nfp:nat:10110"',
             rendered,
         )
-        self.assertNotIn('comment "nfp:in:10110" dnat', rendered)
+        self.assertNotIn('comment "nfp:nat:10110" dnat', rendered)
 
     def test_forward_counters_have_typed_protocol_and_trailing_comment(self):
         manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
@@ -49,16 +52,40 @@ class ValidationTests(unittest.TestCase):
             ForwardRule(None, 10110, "141.11.219.150", 19849, inbound_limit_mbps=8),
         ])
         self.assertIn(
-            'ct direction original ct original protocol tcp ct original proto-dst 10110 '
-            'counter limit rate over 1000 kbytes/second drop comment "nfp:forward-in:10110"',
+            'ct direction reply ct original protocol tcp ct original proto-dst 10110 '
+            'counter limit rate over 1000 kbytes/second drop comment "nfp:traffic-in:10110"',
             rendered,
         )
         self.assertIn(
-            'ct direction reply ct original protocol udp ct original proto-dst 10110 '
-            'counter comment "nfp:out:10110"',
+            'ct direction original ct original protocol udp ct original proto-dst 10110 '
+            'counter comment "nfp:traffic-out:10110"',
             rendered,
         )
-        self.assertNotIn('comment "nfp:forward-in:10110" limit', rendered)
+        self.assertNotIn('comment "nfp:traffic-in:10110" limit', rendered)
+
+    @patch("nft_manager.shutil.which", return_value="/usr/sbin/nft")
+    def test_traffic_uses_forwarding_counters_not_nat_first_packet(self, _which):
+        manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
+        payload = {"nftables": [
+            {"rule": {"comment": "nfp:nat:10110", "expr": [{"counter": {"bytes": 60}}]}},
+            {"rule": {"comment": "nfp:traffic-in:10110", "expr": [{"counter": {"bytes": 1200}}]}},
+            {"rule": {"comment": "nfp:traffic-in:10110", "expr": [{"counter": {"bytes": 300}}]}},
+            {"rule": {"comment": "nfp:traffic-out:10110", "expr": [{"counter": {"bytes": 900}}]}},
+        ]}
+        manager._run = lambda *args, **kwargs: CompletedProcess([], 0, json.dumps(payload), "")
+        self.assertEqual(manager.traffic_counters(), {10110: {"inbound": 1500, "outbound": 900}})
+
+    @patch("nft_manager.shutil.which", return_value="/usr/sbin/conntrack")
+    def test_connections_use_original_destination_port(self, _which):
+        manager = NftManager("/tmp/port-forward.conf", "/tmp/nftables.conf", "/tmp/forward.conf")
+        output = chr(10).join((
+            "tcp 6 431999 ESTABLISHED src=198.51.100.20 dst=192.0.2.10 sport=50000 dport=10110 "
+            "src=141.11.219.150 dst=198.51.100.20 sport=19849 dport=50000 [ASSURED] mark=0 use=1",
+            "udp 17 29 src=198.51.100.21 dst=192.0.2.10 sport=50001 dport=10110 "
+            "src=141.11.219.150 dst=198.51.100.21 sport=19849 dport=50001 mark=0 use=1",
+        ))
+        manager._run = lambda *args, **kwargs: CompletedProcess([], 0, output, "")
+        self.assertEqual(manager.connection_counts(), {10110: 2})
 
 
 if __name__ == "__main__":
