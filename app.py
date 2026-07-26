@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import math
 import os
 import re
 import secrets
@@ -181,6 +182,26 @@ def validate_rule_note(value: str) -> str:
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError("规则备注不能包含换行或控制字符。")
     return value
+
+
+def parse_bounded_int(value: str | None, label: str, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value or "")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须是整数。") from exc
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{label}须为 {minimum}–{maximum}。")
+    return parsed
+
+
+def parse_bounded_float(value: str | None, label: str, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value or "")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须是数字。") from exc
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{label}须为 {minimum:g}–{maximum:g}。")
+    return parsed
 
 
 def account_identifier_conflicts(connection: sqlite3.Connection, username: str, email: str, excluded_id: int | None = None) -> bool:
@@ -666,7 +687,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         user = current_user()
         manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
         try:
-            owner_id = int(request.form.get("owner_id", user["id"])) if user["role"] == "admin" else user["id"]
+            owner_id = parse_bounded_int(request.form.get("owner_id"), "规则所有者", 1, 2 ** 63 - 1) if user["role"] == "admin" else user["id"]
             owner = get_db().execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone()
             if owner is None or not owner["active"]:
                 raise NftOperationError("请选择一个有效的启用用户作为规则所有者。")
@@ -676,15 +697,14 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             rule_count = get_db().execute("SELECT COUNT(*) FROM forward_rules WHERE owner_id = ?", (owner_id,)).fetchone()[0]
             if int(owner["max_rules"]) > 0 and rule_count >= int(owner["max_rules"]):
                 raise NftOperationError(f"该用户最多可创建 {owner['max_rules']} 条转发规则。")
-            inbound_limit = int(request.form.get("inbound_limit_mbps", owner["default_inbound_mbps"]) or 0)
-            outbound_limit = int(request.form.get("outbound_limit_mbps", owner["default_outbound_mbps"]) or 0)
-            if user["role"] != "admin":
+            if user["role"] == "admin":
+                inbound_limit = parse_bounded_int(request.form.get("inbound_limit_mbps", "0"), "入站带宽限制", 0, 100000)
+                outbound_limit = parse_bounded_int(request.form.get("outbound_limit_mbps", "0"), "出站带宽限制", 0, 100000)
+            else:
                 inbound_limit = int(owner["default_inbound_mbps"])
                 outbound_limit = int(owner["default_outbound_mbps"])
             owner_usage = monthly_usage(get_db(), owner)
             initial_pause = desired_pause_reason(owner, owner_usage)
-            if not 0 <= inbound_limit <= 100000 or not 0 <= outbound_limit <= 100000:
-                raise NftOperationError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
             note = validate_rule_note(request.form.get("note", ""))
             new_rule = ForwardRule(
                 id=None,
@@ -737,7 +757,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 if user["role"] != "admin" and int(current["owner_id"]) != int(user["id"]):
                     abort(403)
 
-                owner_id = int(request.form.get("owner_id", current["owner_id"])) if user["role"] == "admin" else int(user["id"])
+                owner_id = parse_bounded_int(request.form.get("owner_id"), "规则所有者", 1, 2 ** 63 - 1) if user["role"] == "admin" else int(user["id"])
                 owner = connection.execute("SELECT * FROM users WHERE id=?", (owner_id,)).fetchone()
                 if owner is None or not owner["active"]:
                     raise NftOperationError("请选择一个有效的启用用户作为规则所有者。")
@@ -755,13 +775,12 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     if user["role"] != "admin" or request.form.get("force_conflict") != "1":
                         raise NftOperationError("该端口已被本机服务监听。仅管理员确认风险后可以继续修改。")
 
-                inbound_limit = int(request.form.get("inbound_limit_mbps", owner["default_inbound_mbps"]) or 0)
-                outbound_limit = int(request.form.get("outbound_limit_mbps", owner["default_outbound_mbps"]) or 0)
-                if user["role"] != "admin":
+                if user["role"] == "admin":
+                    inbound_limit = parse_bounded_int(request.form.get("inbound_limit_mbps", "0"), "入站带宽限制", 0, 100000)
+                    outbound_limit = parse_bounded_int(request.form.get("outbound_limit_mbps", "0"), "出站带宽限制", 0, 100000)
+                else:
                     inbound_limit = int(owner["default_inbound_mbps"])
                     outbound_limit = int(owner["default_outbound_mbps"])
-                if not 0 <= inbound_limit <= 100000 or not 0 <= outbound_limit <= 100000:
-                    raise NftOperationError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
                 note = validate_rule_note(request.form.get("note", ""))
                 updated = ForwardRule(
                     id=rule_id,
@@ -792,7 +811,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     int(row["id"]) != rule_id and row["destination_ip"] == previous.destination_ip
                     and int(row["destination_port"]) == previous.destination_port for row in all_rows
                 )
-                if (previous.destination_ip, previous.destination_port) != (updated.destination_ip, updated.destination_port):
+                firewall_target_changed = (
+                    previous.listen_port != updated.listen_port
+                    or (previous.destination_ip, previous.destination_port) != (updated.destination_ip, updated.destination_port)
+                )
+                if firewall_target_changed:
                     warnings.extend(manager.firewall_close(previous, old_destination_used))
                 add_audit(
                     "rule_update", str(rule_id),
@@ -908,28 +931,27 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     def update_user_policy(user_id: int) -> Any:
         require_csrf()
         try:
-            max_rules = int(request.form.get("max_rules", "10"))
+            max_rules = parse_bounded_int(request.form.get("max_rules"), "规则上限", 0, 10000)
             port_min = NftManager.validate_port(request.form.get("port_min", "1024"))
             port_max = NftManager.validate_port(request.form.get("port_max", "65535"))
-            inbound = int(request.form.get("default_inbound_mbps", "0"))
-            outbound = int(request.form.get("default_outbound_mbps", "0"))
-            quota_gib = float(request.form.get("monthly_quota_gib", "0"))
+            inbound = parse_bounded_int(request.form.get("default_inbound_mbps"), "默认入站带宽限制", 0, 100000)
+            outbound = parse_bounded_int(request.form.get("default_outbound_mbps"), "默认出站带宽限制", 0, 100000)
+            quota_gib = parse_bounded_float(request.form.get("monthly_quota_gib"), "月流量额度", 0, 1048576)
             expires_at = validate_expiry(request.form.get("expires_at", ""))
             reset_day, reset_minute = validate_reset_schedule(request.form.get("monthly_reset_day", "1"), request.form.get("monthly_reset_time", "00:00"))
             entry_address = validate_entry_address(request.form.get("entry_address", ""))
-            if not 0 <= max_rules <= 10000:
-                raise ValueError("规则上限须为 0–10000，0 表示不限数量。")
             if port_min > port_max:
                 raise ValueError("端口范围起始值不能大于结束值。")
-            if not 0 <= inbound <= 100000 or not 0 <= outbound <= 100000:
-                raise ValueError("带宽限制须为 0–100000 Mbps，0 表示不限速。")
-            if not 0 <= quota_gib <= 1048576:
-                raise ValueError("月流量额度须为 0–1048576 GiB，0 表示不限。")
             quota_bytes = int(quota_gib * 1024 ** 3)
             connection = get_db()
             target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if target is None:
                 raise ValueError("账户不存在。")
+            previous_policy = dict(target)
+            previous_limits = connection.execute(
+                "SELECT id, inbound_limit_mbps, outbound_limit_mbps FROM forward_rules WHERE owner_id=?",
+                (user_id,),
+            ).fetchall()
             connection.execute(
                 "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, monthly_reset_minute=?, entry_address=? WHERE id=?",
                 (max_rules, port_min, port_max, inbound, outbound, quota_bytes, expires_at, reset_day, reset_minute, entry_address, user_id),
@@ -939,7 +961,27 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 (inbound, outbound, user_id),
             )
             connection.commit()
-            reconcile_rule_state(app, force_apply=True)
+            try:
+                reconcile_rule_state(app, force_apply=True)
+            except NftOperationError:
+                connection.execute(
+                    "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, monthly_reset_minute=?, entry_address=? WHERE id=?",
+                    (previous_policy["max_rules"], previous_policy["port_min"], previous_policy["port_max"],
+                     previous_policy["default_inbound_mbps"], previous_policy["default_outbound_mbps"],
+                     previous_policy["monthly_quota_bytes"], previous_policy["expires_at"],
+                     previous_policy["monthly_reset_day"], previous_policy["monthly_reset_minute"],
+                     previous_policy["entry_address"], user_id),
+                )
+                connection.executemany(
+                    "UPDATE forward_rules SET inbound_limit_mbps=?, outbound_limit_mbps=? WHERE id=?",
+                    [(row["inbound_limit_mbps"], row["outbound_limit_mbps"], row["id"]) for row in previous_limits],
+                )
+                connection.commit()
+                try:
+                    reconcile_rule_state(app, force_apply=True)
+                except NftOperationError:
+                    app.logger.exception("Failed to restore nftables after rolling back a user policy update")
+                raise
             add_audit("user_policy", target["identity_id"], f"username={target['username']}; rules={max_rules}; ports={port_min}-{port_max}; in={inbound}; out={outbound}; monthly_quota_bytes={quota_bytes}; expires_at={expires_at or 'never'}; monthly_reset={reset_day}/{reset_minute}; entry_address={entry_address or '(unset)'}")
             connection.commit()
             flash("用户转发策略已更新，到期和额度状态已重新核算。", "success")
