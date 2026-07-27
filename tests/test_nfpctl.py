@@ -38,6 +38,9 @@ class FakeManager:
         self.closed.append((rule, destination_still_used))
         return []
 
+    def traffic_counters(self):
+        return {}
+
     def status(self):
         return {
             "nft_available": True,
