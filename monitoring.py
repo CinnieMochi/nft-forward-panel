@@ -20,6 +20,36 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def reset_counter_baselines(
+    connection: sqlite3.Connection,
+    rules: Iterable[Any],
+) -> None:
+    """Start a fresh zero baseline after nftables recreated the managed table.
+
+    ``NftManager.apply_rules`` deletes and recreates the table, so all nft
+    counters start at zero.  Persisting that zero immediately lets the next
+    sample account for every byte forwarded after the reload instead of
+    discarding the first sample.
+    """
+    sampled_at = utc_now().strftime(SAMPLE_TIME_FORMAT)
+    rule_ids: list[int] = []
+    for rule in rules:
+        try:
+            raw_rule_id = rule["id"]
+        except (KeyError, IndexError, TypeError):
+            raw_rule_id = getattr(rule, "id", None)
+        if raw_rule_id is not None:
+            rule_ids.append(int(raw_rule_id))
+
+    connection.execute("DELETE FROM rule_counter_state")
+    connection.executemany(
+        """INSERT INTO rule_counter_state
+           (rule_id, inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps)
+           VALUES (?, 0, 0, ?, 0, 0)""",
+        [(rule_id, sampled_at) for rule_id in rule_ids],
+    )
+
+
 def probe_tcp(address: str, port: int, timeout: float = 1.5) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -48,10 +78,16 @@ class TrafficMonitor:
                 (rule_id,),
             ).fetchone()
             if port not in raw:
+                if previous and (float(previous["inbound_bps"]) or float(previous["outbound_bps"])):
+                    connection.execute(
+                        "UPDATE rule_counter_state SET inbound_bps=0, outbound_bps=0 WHERE rule_id=?",
+                        (rule_id,),
+                    )
                 result[rule_id] = {"inbound_bps": 0.0, "outbound_bps": 0.0}
                 continue
             delta_in = delta_out = 0
             elapsed = 5.0
+            preserve_previous_rate = False
             if previous:
                 previous_dt = None
                 for sample_format in (SAMPLE_TIME_FORMAT, LEGACY_SAMPLE_TIME_FORMAT):
@@ -63,19 +99,23 @@ class TrafficMonitor:
                 if previous_dt is not None:
                     elapsed = max(0.0, (now_dt - previous_dt).total_seconds())
                 if elapsed < MIN_SAMPLE_INTERVAL_SECONDS:
-                    result[rule_id] = {
-                        "inbound_bps": float(previous["inbound_bps"]),
-                        "outbound_bps": float(previous["outbound_bps"]),
-                    }
-                    continue
+                    # A rule reload may immediately follow this sample.  Always
+                    # settle byte deltas so recreating the nft table cannot
+                    # discard them, while retaining the last stable rate to
+                    # avoid a sub-second speed spike in the UI.
+                    preserve_previous_rate = True
                 delta_in = current["inbound"] - int(previous["inbound_bytes"])
                 delta_out = current["outbound"] - int(previous["outbound_bytes"])
                 if delta_in < 0:
                     delta_in = 0
                 if delta_out < 0:
                     delta_out = 0
-            inbound_bps = round(delta_in / elapsed, 1)
-            outbound_bps = round(delta_out / elapsed, 1)
+            if preserve_previous_rate and previous:
+                inbound_bps = float(previous["inbound_bps"])
+                outbound_bps = float(previous["outbound_bps"])
+            else:
+                inbound_bps = round(delta_in / elapsed, 1)
+                outbound_bps = round(delta_out / elapsed, 1)
             connection.execute(
                 """INSERT INTO rule_counter_state(rule_id, inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps)
                    VALUES (?, ?, ?, ?, ?, ?)
@@ -88,8 +128,7 @@ class TrafficMonitor:
                 connection.execute(
                     """INSERT INTO traffic_buckets(rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
                        VALUES (?, ?, ?, ?, ?)
-                       ON CONFLICT(rule_id, bucket_at) DO UPDATE SET
-                       owner_id=excluded.owner_id,
+                       ON CONFLICT(rule_id, owner_id, bucket_at) DO UPDATE SET
                        inbound_bytes=inbound_bytes+excluded.inbound_bytes,
                        outbound_bytes=outbound_bytes+excluded.outbound_bytes""",
                     (rule_id, int(rule["owner_id"]), bucket, delta_in, delta_out),
