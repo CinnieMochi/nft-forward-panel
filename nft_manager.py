@@ -181,22 +181,33 @@ class NftManager:
                     f"        ip daddr {rule.destination_ip} udp dport {rule.destination_port} ct status dnat snat to $LOCAL_IP",
                 ]
             )
-        lines.extend(["    }", "", "    chain forwarding {"])
+        lines.append("    }")
+        for rule in sorted_rules:
+            for direction, limit_mbps in (
+                ("out", rule.outbound_limit_mbps),
+                ("in", rule.inbound_limit_mbps),
+            ):
+                lines.extend(["", f"    chain nfp_{direction}_{rule.listen_port} {{"])
+                if limit_mbps:
+                    lines.append(
+                        f"        limit rate over {max(1, limit_mbps * 125)} "
+                        "kbytes/second drop"
+                    )
+                lines.extend(
+                    [
+                        f'        counter comment "nfp:traffic-{direction}:{rule.listen_port}"',
+                        "    }",
+                    ]
+                )
+
+        lines.extend(["", "    chain forwarding {"])
         lines.append("        type filter hook forward priority 10; policy accept;")
         for rule in sorted_rules:
-            inbound_limit = (
-                f" limit rate over {max(1, rule.inbound_limit_mbps * 125)} kbytes/second drop"
-                if rule.inbound_limit_mbps else ""
-            )
-            outbound_limit = (
-                f" limit rate over {max(1, rule.outbound_limit_mbps * 125)} kbytes/second drop"
-                if rule.outbound_limit_mbps else ""
-            )
             lines.append("")
             for protocol in ("tcp", "udp"):
                 lines.extend([
-                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
-                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
+                    f"        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} jump nfp_out_{rule.listen_port}",
+                    f"        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} jump nfp_in_{rule.listen_port}",
                 ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
