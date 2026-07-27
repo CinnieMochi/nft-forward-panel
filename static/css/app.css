@@ -31,10 +31,10 @@ dialog{max-height:calc(100dvh - 24px);overflow:hidden}
 /* SVG gauges avoid inline styles so the strict style-src CSP remains effective. */
 .bandwidth-gauge{background:none}
 .bandwidth-gauge:before{display:none}
-.bandwidth-gauge svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(128deg);overflow:visible}
+.bandwidth-gauge svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(135deg);overflow:visible}
 .bandwidth-gauge circle{fill:none;stroke-width:7;stroke-linecap:round;stroke-dashoffset:0}
-.bandwidth-gauge .gauge-track{stroke:#e7ebf1;stroke-dasharray:70 100}
-.bandwidth-gauge .gauge-value{stroke:var(--green);stroke-dasharray:0 100;transition:stroke-dasharray .18s ease,stroke .18s ease}
+.bandwidth-gauge .gauge-track{stroke:#e7ebf1;stroke-dasharray:75 100}
+.bandwidth-gauge .gauge-value{stroke:var(--green);transition:stroke-dasharray .18s ease,stroke .18s ease}
 .bandwidth-gauge.gauge-green .gauge-value{stroke:var(--green)}
 .bandwidth-gauge.gauge-orange .gauge-value{stroke:var(--orange)}
 .bandwidth-gauge.gauge-red .gauge-value{stroke:var(--red)}
