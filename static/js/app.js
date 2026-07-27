@@ -195,6 +195,11 @@
       updateBandwidthGauge("outbound", data.totals.outbound_bps);
       document.querySelectorAll('[data-metric="monthly"]').forEach((node) => { node.textContent = formatBytes(data.totals.monthly_bytes); });
       document.querySelectorAll('[data-metric="connections"]').forEach((node) => { node.textContent = data.totals.connections; });
+      document.querySelectorAll('[data-metric="tcp-connections"]').forEach((node) => { node.textContent = data.totals.tcp_connections; });
+      document.querySelectorAll('[data-metric="udp-connections"]').forEach((node) => { node.textContent = data.totals.udp_connections; });
+      document.querySelectorAll('[data-metric="rule-count"]').forEach((node) => { node.textContent = data.totals.rule_count; });
+      document.querySelectorAll('[data-metric="previous-hour-inbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.previous_hour_inbound_bytes); });
+      document.querySelectorAll('[data-metric="previous-hour-outbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.previous_hour_outbound_bytes); });
       connectionPoints.push(Math.max(0, Number(data.totals.connections) || 0));
       connectionPoints = connectionPoints.slice(-60);
       drawConnectionsSparkline();
@@ -206,11 +211,9 @@
         if (rule.paused_reason) {
           status.className = "connectivity paused";
           status.querySelector("b").textContent = rule.paused_label;
-          status.querySelector("small").textContent = "规则已保留";
         } else {
           status.className = `connectivity ${rule.reachable ? "online" : "offline"}`;
-          status.querySelector("b").textContent = rule.reachable ? "可用" : "不可达";
-          status.querySelector("small").textContent = rule.reachable ? `${rule.latency_ms} ms` : "连接失败";
+          status.querySelector("b").textContent = rule.reachable ? `${rule.latency_ms} ms` : "失联";
         }
         row.querySelector(".in-rate").textContent = `↓ ${formatBytes(rule.inbound_bps, "/s")}`;
         row.querySelector(".out-rate").textContent = `↑ ${formatBytes(rule.outbound_bps, "/s")}`;
@@ -245,7 +248,7 @@
       }
       livePoints.push({time: Date.now(), inbound: data.totals.inbound_bps, outbound: data.totals.outbound_bps});
       livePoints = livePoints.slice(-120);
-      if (document.querySelector('[data-chart-kind="bandwidth"]')) drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+      if (document.querySelector('[data-chart-kind="bandwidth"]') && document.querySelector('[data-range] .active')?.dataset.rangeValue === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
     } catch (error) {
       document.querySelectorAll(".connectivity.pending b").forEach((node) => { node.textContent = "刷新失败"; });
     } finally {
@@ -313,16 +316,26 @@
     }
   }
 
-  async function loadHistory(days = 7) {
+  const periodLabel = (period, days) => {
+    const normalized = period.includes("T") ? period : period.replace(" ", "T");
+    const date = new Date(`${normalized}${normalized.length === 16 ? ":00" : "T00:00:00"}Z`);
+    if (Number.isNaN(date.getTime())) return period;
+    if (Number(days) === 30) return date.toLocaleDateString([], {month: "2-digit", day: "2-digit"});
+    return date.toLocaleString([], {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
+  };
+  async function loadHistory(days = 1) {
     const panel = document.querySelector("[data-history-url]");
     if (!panel) return;
-    const response = await fetch(`${panel.dataset.historyUrl}?days=${days}`);
+    const kind = panel.dataset.chartKind;
+    const response = await fetch(`${panel.dataset.historyUrl}?kind=${kind}&days=${days}`);
+    if (!response.ok) return;
     const data = await response.json();
-    const points = panel.dataset.chartKind === "bandwidth" ? data.points.map((point) => ({...point, inbound: Number(point.inbound) / 86400, outbound: Number(point.outbound) / 86400})) : data.points;
-    drawChart(points, panel.dataset.chartKind === "bandwidth");
+    const rawPoints = data.points.map((point) => ({...point, period: periodLabel(point.period, days)}));
+    const points = kind === "bandwidth" ? rawPoints.map((point) => ({...point, inbound: Number(point.inbound) / data.interval_seconds, outbound: Number(point.outbound) / data.interval_seconds})) : rawPoints;
+    drawChart(points, kind === "bandwidth");
     const body = document.querySelector("[data-history-body]");
     body.replaceChildren();
-    if (!data.points.length) {
+    if (!rawPoints.length) {
       const row = document.createElement("tr");
       const cell = document.createElement("td");
       cell.colSpan = 4;
@@ -330,22 +343,32 @@
       row.append(cell);
       body.append(row);
     }
-    data.points.slice().reverse().forEach((point) => {
+    rawPoints.slice().reverse().forEach((point) => {
       const row = document.createElement("tr");
-      [point.period, formatBytes(point.inbound), formatBytes(point.outbound)].forEach((value) => {
-        const cell = document.createElement("td");
-        cell.textContent = value;
-        row.append(cell);
-      });
+      const values = kind === "bandwidth" ? [point.period, formatBytes(Number(point.inbound) / data.interval_seconds, "/s"), formatBytes(Number(point.outbound) / data.interval_seconds, "/s")] : [point.period, formatBytes(point.inbound), formatBytes(point.outbound)];
+      values.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); });
       const totalCell = document.createElement("td");
       const total = document.createElement("strong");
-      total.textContent = formatBytes(Number(point.inbound) + Number(point.outbound));
-      totalCell.append(total);
-      row.append(totalCell);
-      body.append(row);
+      total.textContent = kind === "bandwidth" ? formatBytes((Number(point.inbound) + Number(point.outbound)) / data.interval_seconds, "/s") : formatBytes(Number(point.inbound) + Number(point.outbound));
+      totalCell.append(total); row.append(totalCell); body.append(row);
     });
   }
-  document.querySelectorAll("[data-range] button").forEach((button) => button.addEventListener("click", () => { button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("active")); button.classList.add("active"); document.querySelector("[data-chart-caption]")?.replaceChildren(`最近 ${button.textContent}`); loadHistory(button.dataset.days); }));
-  window.addEventListener("resize", () => { drawConnectionsSparkline(); if (document.querySelector('[data-chart-kind="bandwidth"]') && livePoints.length) drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString(), inbound: point.inbound, outbound: point.outbound})), true); else loadHistory(document.querySelector("[data-range] .active")?.dataset.days || 7); });
-  loadOverview(); loadHistory(7); if (overview) window.setInterval(loadOverview, 1000);
+  document.querySelectorAll("[data-range] button").forEach((button) => button.addEventListener("click", () => {
+    button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    const value = button.dataset.rangeValue;
+    document.querySelector("[data-chart-caption]")?.replaceChildren(value === "live" ? "当前实时" : `最近 ${button.textContent}`);
+    if (value === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+    else loadHistory(value);
+  }));
+  window.addEventListener("resize", () => {
+    drawConnectionsSparkline();
+    const active = document.querySelector("[data-range] .active")?.dataset.rangeValue;
+    if (active === "live" && livePoints.length) drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString(), inbound: point.inbound, outbound: point.outbound})), true);
+    else if (active) loadHistory(active);
+  });
+  loadOverview();
+  const initialRange = document.querySelector("[data-range] .active")?.dataset.rangeValue;
+  if (initialRange && initialRange !== "live") loadHistory(initialRange);
+  if (overview) window.setInterval(loadOverview, 1000);
 })();
