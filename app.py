@@ -1025,7 +1025,8 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
         with ApplyLock(Path(app.config["DATA_DIR"])):
             live = TrafficMonitor(manager).sample(connection, rules)
-        connections = manager.connection_counts()
+        connection_snapshot = manager.connection_snapshot()
+        connections = connection_snapshot["ports"]
         rows = []
         with ThreadPoolExecutor(max_workers=min(16, max(1, len(rules)))) as executor:
             probes = list(executor.map(lambda item: probe_tcp(item["destination_ip"], int(item["destination_port"])) if not item["paused_reason"] else {"reachable": False, "latency_ms": None}, rules))
@@ -1040,20 +1041,33 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "paused_reason": rule["paused_reason"], "paused_label": pause_label(rule["paused_reason"]),
                 "inbound_limit_mbps": rule["inbound_limit_mbps"], "outbound_limit_mbps": rule["outbound_limit_mbps"],
             })
-        if user["role"] == "admin":
-            monthly_bytes = sum(monthly_usage(connection, account) for account in connection.execute("SELECT * FROM users").fetchall())
-            monthly_quota = 0
-        else:
-            monthly_bytes = monthly_usage(connection, user)
-            monthly_quota = int(user["monthly_quota_bytes"])
+        monthly_bytes = monthly_usage(connection, user)
+        monthly_quota = int(user["monthly_quota_bytes"])
+        current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        previous_hour = current_hour - timedelta(hours=1)
+        previous_params: list[Any] = [previous_hour.strftime(UTC_TIME_FORMAT), current_hour.strftime(UTC_TIME_FORMAT)]
+        previous_owner_filter = ""
+        if user["role"] != "admin":
+            previous_owner_filter = " AND owner_id=?"
+            previous_params.append(user["id"])
+        previous_usage = connection.execute(
+            "SELECT COALESCE(SUM(inbound_bytes),0), COALESCE(SUM(outbound_bytes),0) "
+            "FROM traffic_buckets WHERE bucket_at>=? AND bucket_at<?" + previous_owner_filter,
+            previous_params,
+        ).fetchone()
         return jsonify({"rules": rows, "totals": {
             "inbound_bps": sum(float(row["inbound_bps"]) for row in rows),
             "outbound_bps": sum(float(row["outbound_bps"]) for row in rows),
             "connections": sum(int(row["connections"]) for row in rows),
+            "tcp_connections": sum(int(connection_snapshot["tcp_ports"].get(int(rule["listen_port"]), 0)) for rule in rules),
+            "udp_connections": sum(int(connection_snapshot["udp_ports"].get(int(rule["listen_port"]), 0)) for rule in rules),
+            "rule_count": len(rows),
+            "previous_hour_inbound_bytes": int(previous_usage[0]),
+            "previous_hour_outbound_bytes": int(previous_usage[1]),
             "monthly_bytes": monthly_bytes,
             "monthly_quota_bytes": monthly_quota,
-            "expires_at": format_expiry(user["expires_at"]) if user["role"] != "admin" else "",
-            "monthly_reset": format_reset_schedule(int(user["monthly_reset_day"]), int(user["monthly_reset_minute"])) if user["role"] != "admin" else "",
+            "expires_at": format_expiry(user["expires_at"]),
+            "monthly_reset": format_reset_schedule(int(user["monthly_reset_day"]), int(user["monthly_reset_minute"])),
         }, "sampled_at": now()})
 
     @app.get("/analytics/<kind>")
@@ -1067,24 +1081,36 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     @login_required
     def history_api() -> Any:
         user = current_user()
+        kind = request.args.get("kind", "traffic")
+        allowed_ranges = {"bandwidth": {1, 7, 30}, "traffic": {1, 7, 30}}
+        if kind not in allowed_ranges:
+            abort(400)
         try:
-            days = min(60, max(1, int(request.args.get("days", "7"))))
+            days = int(request.args.get("days", "1"))
         except ValueError:
-            days = 7
+            days = 1
+        if days not in allowed_ranges[kind]:
+            abort(400)
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        cutoff_text = cutoff.strftime("%Y-%m-%d %H:%M:%S UTC")
+        cutoff_text = cutoff.strftime(UTC_TIME_FORMAT)
         params: list[Any] = [cutoff_text]
         owner_filter = ""
         if user["role"] != "admin":
             owner_filter = " AND t.owner_id=?"
             params.append(user["id"])
+        period_sql = (
+            "substr(t.bucket_at,1,16)" if kind == "bandwidth" and days == 1 else
+            "substr(t.bucket_at,1,13) || ':00'" if days <= 7 else
+            "substr(t.bucket_at,1,10)"
+        )
         rows = get_db().execute(
-            """SELECT substr(t.bucket_at,1,10) AS period, SUM(t.inbound_bytes) AS inbound,
-                      SUM(t.outbound_bytes) AS outbound
-               FROM traffic_buckets t WHERE t.bucket_at>=?""" + owner_filter + " GROUP BY period ORDER BY period",
+            f"""SELECT {period_sql} AS period, SUM(t.inbound_bytes) AS inbound,
+                       SUM(t.outbound_bytes) AS outbound
+                FROM traffic_buckets t WHERE t.bucket_at>=?""" + owner_filter + " GROUP BY period ORDER BY period",
             params,
         ).fetchall()
-        return jsonify({"days": days, "points": [dict(row) for row in rows]})
+        interval_seconds = 300 if kind == "bandwidth" and days == 1 else 3600 if days <= 7 else 86400
+        return jsonify({"kind": kind, "days": days, "interval_seconds": interval_seconds, "points": [dict(row) for row in rows]})
 
     @app.get("/audit")
     @admin_required
