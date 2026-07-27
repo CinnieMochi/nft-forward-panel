@@ -181,22 +181,6 @@ class NftManager:
                     f"        ip daddr {rule.destination_ip} udp dport {rule.destination_port} ct status dnat snat to $LOCAL_IP",
                 ]
             )
-        lines.extend(["    }", "", "    chain traffic_prerouting {"])
-        lines.append("        type filter hook prerouting priority 0; policy accept;")
-        for rule in sorted_rules:
-            lines.append("")
-            for protocol in ("tcp", "udp"):
-                lines.append(
-                    f'        ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter comment "nfp:traffic-in:{rule.listen_port}"'
-                )
-        lines.extend(["    }", "", "    chain traffic_postrouting {"])
-        lines.append("        type filter hook postrouting priority 0; policy accept;")
-        for rule in sorted_rules:
-            lines.append("")
-            for protocol in ("tcp", "udp"):
-                lines.append(
-                    f'        ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter comment "nfp:traffic-out:{rule.listen_port}"'
-                )
         lines.extend(["    }", "", "    chain forwarding {"])
         lines.append("        type filter hook forward priority 10; policy accept;")
         for rule in sorted_rules:
@@ -211,8 +195,8 @@ class NftManager:
             lines.append("")
             for protocol in ("tcp", "udp"):
                 lines.extend([
-                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:limit-out:{rule.listen_port}"',
-                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:limit-in:{rule.listen_port}"',
+                    f'        ip daddr {rule.destination_ip} {protocol} dport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{outbound_limit} comment "nfp:traffic-out:{rule.listen_port}"',
+                    f'        ip saddr {rule.destination_ip} {protocol} sport {rule.destination_port} ct status dnat ct original protocol {protocol} ct original proto-dst {rule.listen_port} counter{inbound_limit} comment "nfp:traffic-in:{rule.listen_port}"',
                 ])
         lines.extend(["    }", "}", ""])
         return "\n".join(lines)
@@ -417,6 +401,26 @@ class NftManager:
         if not self._exists_and_succeeds(check_args):
             self._run(["iptables", "-I", *args])
 
+    def _run_idempotent_delete(
+        self,
+        args: list[str],
+        *,
+        absent_returncodes: frozenset[int],
+        absent_markers: tuple[str, ...],
+    ) -> None:
+        result = self._run(args, check=False)
+        if result.returncode == 0:
+            return
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+        normalized = output.casefold()
+        known_absence = result.returncode in absent_returncodes and (
+            not absent_markers or any(marker in normalized for marker in absent_markers)
+        )
+        if known_absence:
+            return
+        message = (result.stderr or result.stdout or "未知错误").strip()
+        raise NftOperationError(f"命令执行失败（{args[0]}）：{message}")
+
     def firewall_open(self, rule: ForwardRule) -> list[str]:
         """Mirror the original script's firewall allowances; warnings are returned."""
         warnings: list[str] = []
@@ -438,23 +442,52 @@ class NftManager:
             warnings.append(f"转发规则已生效，但防火墙放行失败：{exc}")
         return warnings
 
-    def firewall_close(self, rule: ForwardRule, destination_still_used: bool) -> list[str]:
+    def firewall_close(
+        self,
+        rule: ForwardRule,
+        destination_still_used: bool,
+        *,
+        remove_listen_port: bool = True,
+    ) -> list[str]:
         warnings: list[str] = []
         try:
             if self._firewalld_active():
-                for protocol in ("tcp", "udp"):
-                    self._run(["firewall-cmd", f"--remove-port={rule.listen_port}/{protocol}", "--permanent"], check=False)
-                self._run(["firewall-cmd", "--reload"])
+                if remove_listen_port:
+                    for protocol in ("tcp", "udp"):
+                        self._run_idempotent_delete(
+                            ["firewall-cmd", f"--remove-port={rule.listen_port}/{protocol}", "--permanent"],
+                            absent_returncodes=frozenset({12}),
+                            absent_markers=(),
+                        )
+                    self._run(["firewall-cmd", "--reload"])
             elif self._ufw_active():
                 for protocol in ("tcp", "udp"):
-                    self._run(["ufw", "--force", "delete", "allow", f"{rule.listen_port}/{protocol}"], check=False)
+                    if remove_listen_port:
+                        self._run_idempotent_delete(
+                            ["ufw", "--force", "delete", "allow", f"{rule.listen_port}/{protocol}"],
+                            absent_returncodes=frozenset({1}),
+                            absent_markers=("non-existent rule", "nonexistent rule"),
+                        )
                     if not destination_still_used:
-                        self._run(["ufw", "--force", "route", "delete", "allow", "proto", protocol, "to", rule.destination_ip, "port", str(rule.destination_port)], check=False)
+                        self._run_idempotent_delete(
+                            ["ufw", "--force", "route", "delete", "allow", "proto", protocol, "to", rule.destination_ip, "port", str(rule.destination_port)],
+                            absent_returncodes=frozenset({1}),
+                            absent_markers=("non-existent rule", "nonexistent rule"),
+                        )
             elif self._iptables_available():
                 for protocol in ("tcp", "udp"):
-                    self._run(["iptables", "-D", "INPUT", "-p", protocol, "--dport", str(rule.listen_port), "-j", "ACCEPT"], check=False)
+                    if remove_listen_port:
+                        self._run_idempotent_delete(
+                            ["iptables", "-D", "INPUT", "-p", protocol, "--dport", str(rule.listen_port), "-j", "ACCEPT"],
+                            absent_returncodes=frozenset({1}),
+                            absent_markers=("bad rule", "does a matching rule exist", "no chain/target/match"),
+                        )
                     if not destination_still_used:
-                        self._run(["iptables", "-D", "FORWARD", "-d", rule.destination_ip, "-p", protocol, "--dport", str(rule.destination_port), "-j", "ACCEPT"], check=False)
+                        self._run_idempotent_delete(
+                            ["iptables", "-D", "FORWARD", "-d", rule.destination_ip, "-p", protocol, "--dport", str(rule.destination_port), "-j", "ACCEPT"],
+                            absent_returncodes=frozenset({1}),
+                            absent_markers=("bad rule", "does a matching rule exist", "no chain/target/match"),
+                        )
         except NftOperationError as exc:
             warnings.append(f"转发规则已删除，但防火墙清理失败：{exc}")
         return warnings
