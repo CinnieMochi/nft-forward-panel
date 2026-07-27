@@ -2,7 +2,35 @@
 {% set titles = {'bandwidth':'带宽记录','traffic':'流量统计','connections':'连接统计'} %}
 {% block title %}{{ titles[kind] }} · Mochi Forward{% endblock %}{% block page_name %}{{ titles[kind] }}{% endblock %}
 {% block content %}
-<section class="page-heading"><div><p class="eyebrow">MONITORING</p><h1>{{ titles[kind] }}</h1><p class="muted">{{ '展示实时入站与出站速率趋势。' if kind == 'bandwidth' else '按天汇总入站与出站流量，最长保留 60 天。' if kind == 'traffic' else '展示每条转发规则当前活跃连接数。' }}</p></div><div class="segmented" data-range><button data-days="1">24 小时</button><button class="active" data-days="7">7 天</button><button data-days="30">30 天</button><button data-days="60">60 天</button></div></section>
-<section class="metric-grid compact live-overview" data-overview-url="{{ url_for('overview_api') }}"><div class="metric-card"><span>实时入站</span><strong data-metric="inbound">0 B/s</strong></div><div class="metric-card"><span>实时出站</span><strong data-metric="outbound">0 B/s</strong></div><div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div><div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div></section>
-{% if kind != 'connections' %}<section class="panel chart-panel" data-history-url="{{ url_for('history_api') }}" data-chart-kind="{{ kind }}"><div class="panel-heading"><div><h2>{{ '入站 / 出站带宽趋势' if kind == 'bandwidth' else '每日流量消耗' }}</h2><p data-chart-caption>最近 7 天</p></div><div class="legend"><span class="in">入站</span><span class="out">出站</span></div></div><div class="chart-wrap"><canvas id="history-chart" aria-label="{{ titles[kind] }}图表"></canvas><div class="chart-empty">暂无统计数据</div></div><div class="history-table table-wrap"><table><thead><tr><th>日期</th><th>入站</th><th>出站</th><th>总计</th></tr></thead><tbody data-history-body></tbody></table></div></section>{% else %}<section class="panel rules-panel connection-panel"><div class="panel-heading"><div><h2>规则连接明细</h2><p>每秒刷新一次</p></div></div><div class="connection-list" data-connection-list><div class="empty-state"><p>正在读取连接状态...</p></div></div></section>{% endif %}
+<section class="page-heading">
+  <div><p class="eyebrow">MONITORING</p><h1>{{ titles[kind] }}</h1><p class="muted">{{ '查看实时速率及分级归档趋势。' if kind == 'bandwidth' else '查看整点区间的入站与出站流量消耗。' if kind == 'traffic' else '展示每条转发规则当前活跃连接数。' }}</p></div>
+  {% if kind != 'connections' %}<div class="segmented" data-range data-kind="{{ kind }}">{% if kind == 'bandwidth' %}<button class="active" data-range-value="live">实时</button>{% endif %}<button class="{{ 'active' if kind == 'traffic' else '' }}" data-range-value="1">24 小时</button><button data-range-value="7">7 天</button><button data-range-value="30">30 天</button></div>{% endif %}
+</section>
+<section class="metric-grid compact live-overview analytics-overview" data-overview-url="{{ url_for('overview_api') }}" data-analytics-kind="{{ kind }}">
+  {% if kind == 'connections' %}
+  <div class="metric-card"><span>实时 TCP</span><strong data-metric="tcp-connections">0</strong></div>
+  <div class="metric-card"><span>实时 UDP</span><strong data-metric="udp-connections">0</strong></div>
+  <div class="metric-card"><span>转发规则总数</span><strong data-metric="rule-count">0</strong></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  {% elif kind == 'traffic' %}
+  <div class="metric-card"><span>上一整点入站</span><strong data-metric="previous-hour-inbound">0 B</strong></div>
+  <div class="metric-card"><span>上一整点出站</span><strong data-metric="previous-hour-outbound">0 B</strong></div>
+  <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  {% else %}
+  <div class="metric-card"><span>实时入站</span><strong data-metric="inbound">0 B/s</strong></div>
+  <div class="metric-card"><span>实时出站</span><strong data-metric="outbound">0 B/s</strong></div>
+  <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  {% endif %}
+</section>
+{% if kind != 'connections' %}
+<section class="panel chart-panel" data-history-url="{{ url_for('history_api') }}" data-chart-kind="{{ kind }}">
+  <div class="panel-heading"><div><h2>{{ '入站 / 出站带宽趋势' if kind == 'bandwidth' else '区间流量消耗' }}</h2><p data-chart-caption>{{ '当前实时' if kind == 'bandwidth' else '最近 24 小时' }}</p></div><div class="legend"><span class="in">入站</span><span class="out">出站</span></div></div>
+  <div class="chart-wrap"><canvas id="history-chart" aria-label="{{ titles[kind] }}图表"></canvas><div class="chart-empty">暂无统计数据</div></div>
+  <div class="history-table table-wrap"><table><thead><tr><th>时间区间</th><th>入站</th><th>出站</th><th>总计</th></tr></thead><tbody data-history-body></tbody></table></div>
+</section>
+{% else %}
+<section class="panel rules-panel connection-panel"><div class="panel-heading"><div><h2>规则连接明细</h2><p>每秒刷新一次</p></div></div><div class="connection-list" data-connection-list><div class="empty-state"><p>正在读取连接状态...</p></div></div></section>
+{% endif %}
 {% endblock %}
