@@ -11,8 +11,10 @@
 - 对监听端口、目标端口、IPv4 地址做严格校验；所有系统命令均通过参数数组执行，**不会**拼接 shell 命令。
 - 修改前使用 `nft -c -f` 校验规则；规则文件原子写入，并在加载失败时尝试恢复上一个备份。
 - 兼容原脚本生成的已有规则：首次初始化数据库时会读取该配置并归属给首位管理员。
+- 支持每用户规则数、监听端口范围、月流量额度与重置时间，以及每条规则的双向带宽限制；管理员可校准用户本周期已用流量。
+- 后台约每 2 秒结算 nftables 计数器并更新实时带宽；TCP 连接延迟检测保持不变，但移到后台执行，Web 请求只读取缓存结果。
 - 提供 SSH 备用命令 `nfpctl.py` / `nft.sh`，WebUI 出问题时仍可在 VPS 上查看、新增、删除和清空转发规则。
-- 尽力同步 firewalld、UFW 或 iptables 的放行/清理规则；其失败不会撤销已成功加载的 nftables 规则，但会提示并审计。
+- 同步 firewalld、UFW 或 iptables 的放行/清理规则；失败任务会持久化并由后台自动重试，同时保留提示与审计信息。
 
 ## 架构与权限
 
@@ -30,7 +32,7 @@ flowchart LR
 
 ## 在 Linux 服务器部署
 
-想把项目托管到 GitHub 并通过交互式安装器一键部署，请先阅读 [`GITHUB_DEPLOY.md`](GITHUB_DEPLOY.md)。该方案会在 GitHub Actions 中运行测试、生成 Release 压缩包和 SHA-256 校验文件，安装时询问域名、证书邮箱和管理员凭据。
+想把项目托管到 GitHub 并通过交互式安装器一键部署，请先阅读 [`GITHUB_DEPLOY.md`](GITHUB_DEPLOY.md)。该方案会在 GitHub Actions 中运行测试、生成 Release 压缩包和 SHA-256 校验文件，安装时询问域名、证书邮箱和管理员凭据。远程安装必须固定到明确的 Release 标签，下载脚本后先完整审阅，再以 root 执行；不要从可变的 `main` 分支直接下载并运行安装脚本。
 
 下面以 Debian/Ubuntu 为例。面板需要 root 运行，因为 nftables、sysctl 和防火墙规则只能由 root 修改。服务仅监听 `127.0.0.1:8108`，请用 Nginx/Caddy 终止 HTTPS 并反向代理，**不要直接暴露 Gunicorn 端口到公网**。
 
