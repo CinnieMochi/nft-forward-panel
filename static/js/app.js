@@ -136,29 +136,25 @@
   let connectionPoints = [];
   let overviewBusy = false;
   const drawConnectionsSparkline = () => {
-    document.querySelectorAll("[data-connections-sparkline]").forEach((canvas) => {
-      const ratio = window.devicePixelRatio || 1;
-      const width = Number(canvas.getAttribute("width")) || 76;
-      const height = Number(canvas.getAttribute("height")) || 38;
-      canvas.width = width * ratio;
-      canvas.height = height * ratio;
-      const ctx = canvas.getContext("2d");
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-      ctx.clearRect(0, 0, width, height);
-      if (!connectionPoints.length) return;
-      const maximum = Math.max(1, ...connectionPoints);
+    document.querySelectorAll("[data-connections-sparkline]").forEach((svg) => {
+      const line = svg.querySelector(".sparkline-line");
+      const area = svg.querySelector(".sparkline-area");
+      if (!line || !area || !connectionPoints.length) {
+        line?.removeAttribute("d");
+        area?.removeAttribute("d");
+        return;
+      }
+      const width = 76;
+      const height = 38;
       const bottom = height - 3;
-      const pointAt = (value, index) => ({x: index * width / Math.max(1, connectionPoints.length - 1), y: bottom - value / maximum * (height - 7)});
-      const area = ctx.createLinearGradient(0, 0, 0, height);
-      area.addColorStop(0, "rgba(139, 92, 246, .22)");
-      area.addColorStop(1, "rgba(139, 92, 246, 0)");
-      ctx.beginPath();
-      connectionPoints.forEach((value, index) => { const point = pointAt(value, index); index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y); });
-      ctx.lineTo(width, bottom); ctx.lineTo(0, bottom); ctx.closePath();
-      ctx.fillStyle = area; ctx.fill();
-      ctx.beginPath();
-      connectionPoints.forEach((value, index) => { const point = pointAt(value, index); index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y); });
-      ctx.strokeStyle = "#8b5cf6"; ctx.lineWidth = 1.8; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.stroke();
+      const maximum = Math.max(1, ...connectionPoints);
+      const coordinates = connectionPoints.map((value, index) => ({
+        x: index * width / Math.max(1, connectionPoints.length - 1),
+        y: bottom - value / maximum * (height - 7),
+      }));
+      const path = coordinates.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+      line.setAttribute("d", path);
+      area.setAttribute("d", `${path} L${width} ${bottom} L0 ${bottom} Z`);
     });
   };
   const updateMonthlyQuota = (totals) => {
@@ -263,56 +259,82 @@
     empty.style.display = points.length ? "none" : "grid";
     if (!points.length) return;
     const bars = document.querySelector('[data-chart-kind="traffic"]') !== null;
-    const availableWidth = Math.max(320, canvas.parentElement.clientWidth - 36);
-    canvas.style.width = bars ? `${Math.max(availableWidth, 74 + points.length * 52)}px` : "100%";
-    const ratio = window.devicePixelRatio || 1;
+    canvas.style.width = "100%";
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * ratio; canvas.height = rect.height * ratio;
-    const ctx = canvas.getContext("2d"); ctx.scale(ratio, ratio);
-    const width = rect.width, height = rect.height, pad = {left: 58, right: 18, top: 18, bottom: 40};
-    const plotWidth = width - pad.left - pad.right;
-    const plotHeight = height - pad.top - pad.bottom;
+    const width = Math.max(1, rect.width);
+    const height = Math.max(220, rect.height);
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
     const max = Math.max(1, ...points.flatMap((point) => [Number(point.inbound), Number(point.outbound)]));
-    ctx.font = "11px system-ui"; ctx.textBaseline = "alphabetic"; ctx.lineWidth = 1;
-    for (let step = 0; step <= 4; step += 1) {
-      const y = pad.top + plotHeight * step / 4;
+    ctx.font = "11px system-ui";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 1;
+    const yTickCount = height < 260 ? 4 : 5;
+    const rawYLabels = Array.from({length: yTickCount}, (_, step) => formatBytes(max * (1 - step / (yTickCount - 1)), rates ? "/s" : ""));
+    const yLabels = rawYLabels.filter((label, index) => index === 0 || label !== rawYLabels[index - 1]);
+    const yLabelWidth = Math.max(...yLabels.map((label) => ctx.measureText(label).width));
+    const pad = {left: Math.ceil(yLabelWidth) + 12, right: 10, top: 12, bottom: 36};
+    const plotWidth = Math.max(1, width - pad.left - pad.right);
+    const plotHeight = Math.max(1, height - pad.top - pad.bottom);
+    rawYLabels.forEach((label, step) => {
+      if (step && label === rawYLabels[step - 1]) return;
+      const y = pad.top + plotHeight * step / (yTickCount - 1);
       ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y);
       ctx.strokeStyle = "#e8ebf0"; ctx.stroke();
       ctx.fillStyle = "#8a95a5";
-      ctx.fillText(formatBytes(max * (1 - step / 4), rates ? "/s" : ""), 0, y + 4);
-    }
+      ctx.textAlign = "right";
+      ctx.fillText(label, pad.left - 8, y);
+    });
+    const drawXLabels = (centers) => {
+      const bounds = points.map((point, index) => {
+        const labelWidth = ctx.measureText(point.period).width;
+        const x = Math.max(pad.left + labelWidth / 2, Math.min(width - pad.right - labelWidth / 2, centers[index]));
+        return {index, x, left: x - labelWidth / 2, right: x + labelWidth / 2};
+      });
+      const selected = [];
+      bounds.forEach((bound) => {
+        const previous = selected[selected.length - 1];
+        if (!previous || bound.left >= previous.right + 12) selected.push(bound);
+      });
+      const last = bounds[bounds.length - 1];
+      if (last && selected[selected.length - 1]?.index !== last.index) {
+        while (selected.length && last.left < selected[selected.length - 1].right + 12) selected.pop();
+        selected.push(last);
+      }
+      ctx.fillStyle = "#8a95a5";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      selected.forEach(({index, x}) => ctx.fillText(points[index].period, x, height - 9));
+    };
     if (bars) {
       const groupWidth = plotWidth / points.length;
-      const barWidth = Math.min(16, Math.max(6, groupWidth * 0.3));
+      const barWidth = Math.min(16, Math.max(4, groupWidth * 0.3));
+      const centers = points.map((_, index) => pad.left + groupWidth * (index + 0.5));
       points.forEach((point, index) => {
-        const center = pad.left + groupWidth * (index + 0.5);
         [["inbound", "#1677ff", -barWidth], ["outbound", "#16a765", 0]].forEach(([key, color, offset]) => {
           const barHeight = plotHeight * Number(point[key]) / max;
           ctx.fillStyle = color;
-          ctx.fillRect(center + offset, height - pad.bottom - barHeight, barWidth, barHeight);
+          ctx.fillRect(centers[index] + offset, height - pad.bottom - barHeight, barWidth, barHeight);
         });
-        ctx.fillStyle = "#8a95a5";
-        ctx.textAlign = "center";
-        ctx.fillText(point.period, center, height - 12);
       });
-      ctx.textAlign = "left";
+      drawXLabels(centers);
     } else {
+      const centers = points.map((_, index) => pad.left + plotWidth * index / Math.max(1, points.length - 1));
       const plot = (key, color) => {
         ctx.beginPath();
         points.forEach((point, index) => {
-          const x = pad.left + plotWidth * index / Math.max(1, points.length - 1);
           const y = height - pad.bottom - plotHeight * Number(point[key]) / max;
-          index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+          index ? ctx.lineTo(centers[index], y) : ctx.moveTo(centers[index], y);
         });
         ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
       };
       plot("inbound", "#1677ff"); plot("outbound", "#16a765");
-      const labelIndexes = [...new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])];
-      ctx.fillStyle = "#8a95a5";
-      labelIndexes.forEach((index) => {
-        const x = pad.left + plotWidth * index / Math.max(1, points.length - 1);
-        ctx.fillText(points[index].period, Math.min(x, width - 82), height - 10);
-      });
+      drawXLabels(centers);
     }
   }
 
@@ -323,36 +345,92 @@
     if (Number(days) === 30) return date.toLocaleDateString([], {month: "2-digit", day: "2-digit"});
     return date.toLocaleString([], {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
   };
-  async function loadHistory(days = 1) {
-    const panel = document.querySelector("[data-history-url]");
-    if (!panel) return;
-    const kind = panel.dataset.chartKind;
-    const response = await fetch(`${panel.dataset.historyUrl}?kind=${kind}&days=${days}`);
-    if (!response.ok) return;
-    const data = await response.json();
-    const rawPoints = data.points.map((point) => ({...point, period: periodLabel(point.period, days)}));
-    const points = kind === "bandwidth" ? rawPoints.map((point) => ({...point, inbound: Number(point.inbound) / data.interval_seconds, outbound: Number(point.outbound) / data.interval_seconds})) : rawPoints;
-    drawChart(points, kind === "bandwidth");
-    const body = document.querySelector("[data-history-body]");
-    body.replaceChildren();
-    if (!rawPoints.length) {
+  const historyPanel = document.querySelector("[data-history-url]");
+  const historyBody = document.querySelector("[data-history-body]");
+  const pageSizeSelect = historyPanel?.querySelector(".page-size-select");
+  const pagePicker = historyPanel?.querySelector(".page-picker");
+  const totalPagesNode = historyPanel?.querySelector(".total-pages");
+  const prevPageButton = historyPanel?.querySelector(".prev-page");
+  const nextPageButton = historyPanel?.querySelector(".next-page");
+  let historyRows = [];
+  let historyChartPoints = [];
+  let historyPage = 1;
+  let historyPageSize = 30;
+  let historyInterval = 1;
+
+  const renderHistoryPage = () => {
+    if (!historyBody) return;
+    const totalPages = Math.max(1, Math.ceil(historyRows.length / historyPageSize));
+    historyPage = Math.min(historyPage, totalPages);
+    historyBody.replaceChildren();
+    if (!historyRows.length) {
       const row = document.createElement("tr");
       const cell = document.createElement("td");
       cell.colSpan = 4;
       cell.textContent = "暂无记录";
       row.append(cell);
-      body.append(row);
+      historyBody.append(row);
+    } else {
+      const start = (historyPage - 1) * historyPageSize;
+      historyRows.slice(start, start + historyPageSize).forEach((point) => {
+        const row = document.createElement("tr");
+        const rate = historyPanel.dataset.chartKind === "bandwidth";
+        const values = rate
+          ? [point.period, formatBytes(Number(point.inbound) / historyInterval, "/s"), formatBytes(Number(point.outbound) / historyInterval, "/s")]
+          : [point.period, formatBytes(point.inbound), formatBytes(point.outbound)];
+        values.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); });
+        const totalCell = document.createElement("td");
+        const total = document.createElement("strong");
+        const bytes = Number(point.inbound) + Number(point.outbound);
+        total.textContent = rate ? formatBytes(bytes / historyInterval, "/s") : formatBytes(bytes);
+        totalCell.append(total);
+        row.append(totalCell);
+        historyBody.append(row);
+      });
     }
-    rawPoints.slice().reverse().forEach((point) => {
-      const row = document.createElement("tr");
-      const values = kind === "bandwidth" ? [point.period, formatBytes(Number(point.inbound) / data.interval_seconds, "/s"), formatBytes(Number(point.outbound) / data.interval_seconds, "/s")] : [point.period, formatBytes(point.inbound), formatBytes(point.outbound)];
-      values.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); });
-      const totalCell = document.createElement("td");
-      const total = document.createElement("strong");
-      total.textContent = kind === "bandwidth" ? formatBytes((Number(point.inbound) + Number(point.outbound)) / data.interval_seconds, "/s") : formatBytes(Number(point.inbound) + Number(point.outbound));
-      totalCell.append(total); row.append(totalCell); body.append(row);
-    });
+    totalPagesNode.textContent = totalPages;
+    pagePicker.replaceChildren(...Array.from({length: totalPages}, (_, index) => {
+      const option = document.createElement("option");
+      option.value = String(index + 1);
+      option.textContent = String(index + 1);
+      option.selected = index + 1 === historyPage;
+      return option;
+    }));
+    prevPageButton.disabled = historyPage === 1;
+    nextPageButton.disabled = historyPage === totalPages;
+  };
+
+  async function loadHistory(days = 1) {
+    if (!historyPanel) return;
+    const kind = historyPanel.dataset.chartKind;
+    const response = await fetch(`${historyPanel.dataset.historyUrl}?kind=${kind}&days=${days}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    const rawPoints = data.points.map((point) => ({...point, period: periodLabel(point.period, days)}));
+    historyInterval = Number(data.interval_seconds) || 1;
+    historyRows = rawPoints.slice().reverse();
+    historyPage = 1;
+    renderHistoryPage();
+    historyChartPoints = kind === "bandwidth"
+      ? rawPoints.map((point) => ({...point, inbound: Number(point.inbound) / historyInterval, outbound: Number(point.outbound) / historyInterval}))
+      : rawPoints;
+    drawChart(historyChartPoints, kind === "bandwidth");
   }
+
+  pageSizeSelect?.addEventListener("change", () => {
+    historyPageSize = Number(pageSizeSelect.value) || 30;
+    historyPage = 1;
+    renderHistoryPage();
+  });
+  pagePicker?.addEventListener("change", () => {
+    historyPage = Number(pagePicker.value) || 1;
+    renderHistoryPage();
+  });
+  prevPageButton?.addEventListener("click", () => { if (historyPage > 1) { historyPage -= 1; renderHistoryPage(); } });
+  nextPageButton?.addEventListener("click", () => {
+    if (historyPage < Math.ceil(historyRows.length / historyPageSize)) { historyPage += 1; renderHistoryPage(); }
+  });
+
   document.querySelectorAll("[data-range] button").forEach((button) => button.addEventListener("click", () => {
     button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
@@ -361,12 +439,19 @@
     if (value === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
     else loadHistory(value);
   }));
+  let resizeTimer;
   window.addEventListener("resize", () => {
-    drawConnectionsSparkline();
-    const active = document.querySelector("[data-range] .active")?.dataset.rangeValue;
-    if (active === "live" && livePoints.length) drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString(), inbound: point.inbound, outbound: point.outbound})), true);
-    else if (active) loadHistory(active);
-  });
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      drawConnectionsSparkline();
+      const active = document.querySelector("[data-range] .active")?.dataset.rangeValue;
+      if (active === "live" && livePoints.length) {
+        drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+      } else if (active && historyChartPoints.length) {
+        drawChart(historyChartPoints, document.querySelector("[data-chart-kind]")?.dataset.chartKind === "bandwidth");
+      }
+    }, 120);
+  }, {passive: true});
   loadOverview();
   const initialRange = document.querySelector("[data-range] .active")?.dataset.rangeValue;
   if (initialRange && initialRange !== "live") loadHistory(initialRange);
