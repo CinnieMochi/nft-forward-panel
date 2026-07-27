@@ -19,7 +19,7 @@ git push -u origin main
 
 ## 2. 发布第一个版本
 
-工作流 `.github/workflows/release.yml` 会在推送 `v*` 标签时执行 20 项测试、检查安装脚本语法、生成压缩包及 SHA-256 文件并创建 GitHub Release。
+工作流 `.github/workflows/release.yml` 会在推送 `v*` 标签时执行完整测试、检查安装脚本语法、生成压缩包及 SHA-256 文件并创建 GitHub Release。
 
 ```bash
 git tag -a v1.0.0 -m "v1.0.0"
@@ -38,12 +38,15 @@ nft-forward-panel.tar.gz.sha256
 先把域名 A 记录指向 VPS，并在云安全组开放 TCP 80、443。然后执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/nft-forward-panel/main/install.sh \
+VERSION=v1.0.0
+curl -fsSL "https://raw.githubusercontent.com/YOUR_NAME/nft-forward-panel/${VERSION}/install.sh" \
   -o /tmp/nft-forward-panel-install.sh
-sudo bash /tmp/nft-forward-panel-install.sh --repo YOUR_NAME/nft-forward-panel
+less /tmp/nft-forward-panel-install.sh
+sudo bash /tmp/nft-forward-panel-install.sh \
+  --repo YOUR_NAME/nft-forward-panel --version "$VERSION"
 ```
 
-安装器会询问域名、证书邮箱、管理员用户名和密码。密码使用隐藏输入，不会出现在 shell 历史中。
+`less` 退出后不会自动执行脚本；确认内容与该标签对应且没有异常，再执行下一条 `sudo bash` 命令。安装器会询问域名、证书邮箱、管理员用户名和密码。密码使用隐藏输入，不会出现在 shell 历史中。
 
 ## 4. 更新
 
@@ -60,9 +63,12 @@ git push origin v1.0.1
 在 VPS 重新下载并执行安装器，选择相同域名即可：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_NAME/nft-forward-panel/main/install.sh \
+VERSION=v1.0.1
+curl -fsSL "https://raw.githubusercontent.com/YOUR_NAME/nft-forward-panel/${VERSION}/install.sh" \
   -o /tmp/nft-forward-panel-install.sh
-sudo bash /tmp/nft-forward-panel-install.sh --repo YOUR_NAME/nft-forward-panel
+less /tmp/nft-forward-panel-install.sh
+sudo bash /tmp/nft-forward-panel-install.sh \
+  --repo YOUR_NAME/nft-forward-panel --version "$VERSION"
 ```
 
 更新会保留 `/var/lib/nft-forward-panel` 中的数据库和头像，并备份旧程序、环境文件、nftables 主配置及 Caddy 配置。
