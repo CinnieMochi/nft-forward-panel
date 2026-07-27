@@ -181,6 +181,32 @@ class SecurityRegressionTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_admin_overview_uses_own_monthly_quota(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            connection.execute("UPDATE users SET monthly_quota_bytes=? WHERE username='admin'", (100 * 1024 ** 3,))
+            connection.commit()
+        finally:
+            connection.close()
+        with (
+            patch("app.TrafficMonitor.sample", return_value={}),
+            patch("app.NftManager.connection_snapshot", return_value={"ports": {}, "tcp_ports": {}, "udp_ports": {}}),
+        ):
+            response = admin.get("/api/overview")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["totals"]["monthly_quota_bytes"], 100 * 1024 ** 3)
+
+    def test_history_uses_requested_archive_interval(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        for kind, days, seconds in (("bandwidth", 1, 300), ("bandwidth", 7, 3600), ("bandwidth", 30, 86400), ("traffic", 1, 3600)):
+            response = admin.get(f"/api/history?kind={kind}&days={days}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["interval_seconds"], seconds)
+        self.assertEqual(admin.get("/api/history?kind=bandwidth&days=60").status_code, 400)
+
     def test_admin_can_edit_rule_owner(self):
         admin = self.web.test_client()
         self.login(admin, "admin", "PreviewOnly!2026")
