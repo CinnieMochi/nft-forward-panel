@@ -224,18 +224,28 @@ def validate_entry_address(value: str) -> str:
         raise ValueError("入口地址必须是有效的 IPv4 地址，或留空。") from exc
 
 
+IDENTITY_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+IDENTITY_ID_LENGTH = 8
+
+
 def new_identity_id() -> str:
-    """Return a stable public account identifier with 128 bits of entropy."""
-    return f"usr_{secrets.token_hex(16)}"
+    """Return a stable, concise public account identifier."""
+    return "".join(secrets.choice(IDENTITY_ID_ALPHABET) for _ in range(IDENTITY_ID_LENGTH))
 
 
 def assign_missing_identity_ids(connection: sqlite3.Connection) -> None:
-    rows = connection.execute("SELECT id FROM users WHERE identity_id IS NULL OR identity_id = ''").fetchall()
+    """Backfill missing and retire the former usr_<hex> public ID format."""
+    rows = connection.execute("SELECT id, identity_id FROM users").fetchall()
     for row in rows:
+        user_id, previous_id = row[0], row[1] or ""
+        if len(previous_id) == IDENTITY_ID_LENGTH and all(char in IDENTITY_ID_ALPHABET for char in previous_id):
+            continue
         while True:
             identity_id = new_identity_id()
             try:
-                connection.execute("UPDATE users SET identity_id = ? WHERE id = ?", (identity_id, row[0]))
+                connection.execute("UPDATE users SET identity_id = ? WHERE id = ?", (identity_id, user_id))
+                if previous_id:
+                    connection.execute("UPDATE audit_events SET target = ? WHERE target = ?", (identity_id, previous_id))
                 break
             except sqlite3.IntegrityError:
                 continue
