@@ -58,7 +58,7 @@ class IdentityIdTests(unittest.TestCase):
             connection.row_factory = sqlite3.Row
             try:
                 user = connection.execute("SELECT * FROM users WHERE username='admin'").fetchone()
-                self.assertRegex(user["identity_id"], r"^usr_[0-9a-f]{32}$")
+                self.assertRegex(user["identity_id"], r"^[A-Z0-9]{8}$")
                 index = connection.execute("PRAGMA index_list(users)").fetchall()
                 self.assertTrue(any(row[1] == "idx_users_identity_unique" for row in index))
             finally:
@@ -91,7 +91,32 @@ class IdentityIdTests(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         try:
             user = connection.execute("SELECT * FROM users WHERE username='legacy'").fetchone()
-            self.assertRegex(user["identity_id"], r"^usr_[0-9a-f]{32}$")
+            self.assertRegex(user["identity_id"], r"^[A-Z0-9]{8}$")
+        finally:
+            connection.close()
+
+    def test_legacy_identity_and_audit_target_are_migrated_together(self):
+        app = create_app(self.config)
+        legacy_id = "usr_" + "a" * 32
+        connection = sqlite3.connect(app.config["DATABASE"])
+        try:
+            user_id = connection.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+            connection.execute("UPDATE users SET identity_id=? WHERE id=?", (legacy_id, user_id))
+            connection.execute(
+                "INSERT INTO audit_events(actor_id, action, target, details, remote_addr, created_at) VALUES (?, 'test', ?, '', '', '2026-01-01 00:00:00 UTC')",
+                (user_id, legacy_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        create_app(self.config)
+        connection = sqlite3.connect(app.config["DATABASE"])
+        try:
+            identity_id = connection.execute("SELECT identity_id FROM users WHERE id=?", (user_id,)).fetchone()[0]
+            target = connection.execute("SELECT target FROM audit_events WHERE action='test'").fetchone()[0]
+            self.assertRegex(identity_id, r"^[A-Z0-9]{8}$")
+            self.assertEqual(target, identity_id)
         finally:
             connection.close()
 
