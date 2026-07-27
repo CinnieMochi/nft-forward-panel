@@ -11,17 +11,17 @@
   <div class="metric-card"><span>实时 TCP</span><strong data-metric="tcp-connections">0</strong></div>
   <div class="metric-card"><span>实时 UDP</span><strong data-metric="udp-connections">0</strong></div>
   <div class="metric-card"><span>转发规则总数</span><strong data-metric="rule-count">0</strong></div>
-  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% elif kind == 'traffic' %}
   <div class="metric-card"><span>上一整点入站</span><strong data-metric="previous-hour-inbound">0 B</strong></div>
   <div class="metric-card"><span>上一整点出站</span><strong data-metric="previous-hour-outbound">0 B</strong></div>
   <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
-  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% else %}
   <div class="metric-card"><span>实时入站</span><strong data-metric="inbound">0 B/s</strong></div>
   <div class="metric-card"><span>实时出站</span><strong data-metric="outbound">0 B/s</strong></div>
   <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
-  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><canvas class="connections-sparkline" data-connections-sparkline width="76" height="38" aria-label="当前连接数走势"></canvas></div>
+  <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% endif %}
 </section>
 {% if kind != 'connections' %}
@@ -29,6 +29,21 @@
   <div class="panel-heading"><div><h2>{{ '入站 / 出站带宽趋势' if kind == 'bandwidth' else '区间流量消耗' }}</h2><p data-chart-caption>{{ '当前实时' if kind == 'bandwidth' else '最近 24 小时' }}</p></div><div class="legend"><span class="in">入站</span><span class="out">出站</span></div></div>
   <div class="chart-wrap"><canvas id="history-chart" aria-label="{{ titles[kind] }}图表"></canvas><div class="chart-empty">暂无统计数据</div></div>
   <div class="history-table table-wrap"><table><thead><tr><th>时间区间</th><th>入站</th><th>出站</th><th>总计</th></tr></thead><tbody data-history-body></tbody></table></div>
+  <div class="history-pagination">
+    <div class="history-page-size">
+      <label>每页显示：<select class="page-size-select">
+        <option value="30">30 条</option>
+        <option value="50">50 条</option>
+        <option value="100">100 条</option>
+      </select></label>
+    </div>
+    <div class="history-page-controls">
+      <span class="history-page-info">共 <span class="total-pages">1</span> 页</span>
+      <button class="history-page-button prev-page" type="button" disabled>上一页</button>
+      <label class="page-picker-label">第 <select class="page-picker" aria-label="选择页码"><option value="1">1</option></select> 页</label>
+      <button class="history-page-button next-page" type="button" disabled>下一页</button>
+    </div>
+  </div>
 </section>
 {% else %}
 <section class="panel rules-panel connection-panel"><div class="panel-heading"><div><h2>规则连接明细</h2><p>每秒刷新一次</p></div></div><div class="connection-list" data-connection-list><div class="empty-state"><p>正在读取连接状态...</p></div></div></section>
