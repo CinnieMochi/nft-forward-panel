@@ -27,7 +27,7 @@ from flask import Flask, abort, current_app, flash, g, jsonify, redirect, render
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from monitoring import TrafficMonitor, probe_tcp
+from monitoring import TrafficMonitor, probe_tcp, reset_counter_baselines
 from nft_manager import ForwardRule, NftManager, NftOperationError
 
 
@@ -39,7 +39,14 @@ MAX_AVATAR_BYTES = 5 * 1024 * 1024
 _apply_lock = threading.RLock()
 UTC_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
 PANEL_TIMEZONE = ZoneInfo("Asia/Shanghai")
-POLICY_INTERVAL_SECONDS = 5
+POLICY_INTERVAL_SECONDS = 2
+LIVE_CACHE_SECONDS = 2.0
+_live_cache_lock = threading.Lock()
+_connection_cache: tuple[float, dict[str, object]] = (
+    0.0,
+    {"ports": {}, "tcp_ports": {}, "udp_ports": {}},
+)
+_probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
 
 class ApplyLock:
@@ -152,7 +159,12 @@ def format_reset_schedule(day: int, minute: int) -> str:
 
 
 def pause_label(reason: str | None) -> str:
-    return {"disabled": "账户已停用", "expired": "已到期", "quota": "月流量已用尽"}.get(reason or "", "运行中")
+    return {
+        "disabled": "账户已停用",
+        "expired": "已到期",
+        "quota": "月流量已用尽",
+        "port_range": "端口超出允许范围",
+    }.get(reason or "", "运行中")
 
 
 def validate_username(value: str) -> str:
@@ -282,6 +294,9 @@ def init_schema(app: Flask) -> None:
     os.chmod(data_dir, 0o700)
     connection = sqlite3.connect(app.config["DATABASE"])
     try:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 15000")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(
             """
@@ -322,16 +337,30 @@ def init_schema(app: Flask) -> None:
             );
             CREATE TABLE IF NOT EXISTS traffic_buckets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL REFERENCES forward_rules(id) ON DELETE CASCADE,
+                rule_id INTEGER NOT NULL,
                 owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 bucket_at TEXT NOT NULL,
                 inbound_bytes INTEGER NOT NULL DEFAULT 0,
                 outbound_bytes INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(rule_id, bucket_at)
+                UNIQUE(rule_id, owner_id, bucket_at)
             );
             CREATE TABLE IF NOT EXISTS login_attempts (
                 remote_addr TEXT NOT NULL,
                 attempted_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS firewall_retry_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation TEXT NOT NULL CHECK(operation IN ('open', 'close')),
+                rule_id INTEGER NOT NULL DEFAULT 0,
+                listen_port INTEGER NOT NULL,
+                destination_ip TEXT NOT NULL,
+                destination_port INTEGER NOT NULL,
+                remove_listen_port INTEGER NOT NULL DEFAULT 1,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(operation, rule_id, listen_port, destination_ip, destination_port, remove_listen_port)
             );
             CREATE INDEX IF NOT EXISTS idx_login_attempts_addr_time ON login_attempts(remote_addr, attempted_at);
             CREATE INDEX IF NOT EXISTS idx_rules_owner ON forward_rules(owner_id);
@@ -355,6 +384,9 @@ def init_schema(app: Flask) -> None:
             "monthly_reset_minute": "ALTER TABLE users ADD COLUMN monthly_reset_minute INTEGER NOT NULL DEFAULT 0",
             "entry_address": "ALTER TABLE users ADD COLUMN entry_address TEXT NOT NULL DEFAULT ''",
             "session_version": "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0",
+            "usage_offset_bytes": "ALTER TABLE users ADD COLUMN usage_offset_bytes INTEGER NOT NULL DEFAULT 0",
+            "usage_offset_cycle_start": "ALTER TABLE users ADD COLUMN usage_offset_cycle_start TEXT NOT NULL DEFAULT ''",
+            "policy_version": "ALTER TABLE users ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in user_columns:
                 connection.execute(sql)
@@ -367,6 +399,7 @@ def init_schema(app: Flask) -> None:
             "outbound_limit_mbps": "ALTER TABLE forward_rules ADD COLUMN outbound_limit_mbps INTEGER NOT NULL DEFAULT 0",
             "paused_reason": "ALTER TABLE forward_rules ADD COLUMN paused_reason TEXT NOT NULL DEFAULT ''",
             "note": "ALTER TABLE forward_rules ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+            "uses_owner_defaults": "ALTER TABLE forward_rules ADD COLUMN uses_owner_defaults INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in rule_columns:
                 connection.execute(sql)
@@ -377,6 +410,80 @@ def init_schema(app: Flask) -> None:
         }.items():
             if name not in counter_columns:
                 connection.execute(sql)
+        # Traffic history must survive rule deletion, and ownership changes
+        # within one five-minute bucket must retain separate owner totals.
+        traffic_foreign_keys = connection.execute("PRAGMA foreign_key_list(traffic_buckets)").fetchall()
+        traffic_unique_indexes: set[tuple[str, ...]] = set()
+        for index_row in connection.execute("PRAGMA index_list('traffic_buckets')").fetchall():
+            if not int(index_row[2]):
+                continue
+            index_name = str(index_row[1]).replace('"', '""')
+            columns = tuple(
+                str(column_row[2])
+                for column_row in connection.execute(
+                    f'PRAGMA index_info("{index_name}")'
+                ).fetchall()
+            )
+            traffic_unique_indexes.add(columns)
+        legacy_staging_exists = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='traffic_buckets_without_rule_fk'"""
+        ).fetchone() is not None
+        traffic_migration_required = (
+            any(row[2] == "forward_rules" for row in traffic_foreign_keys)
+            or ("rule_id", "owner_id", "bucket_at") not in traffic_unique_indexes
+            or ("rule_id", "bucket_at") in traffic_unique_indexes
+            or legacy_staging_exists
+        )
+        if traffic_migration_required:
+            # Finish earlier additive migrations before opening the dedicated
+            # atomic table-rebuild transaction.
+            connection.commit()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                if legacy_staging_exists:
+                    # Recover data left by the older non-transactional
+                    # migration.  Matching IDs/unique rows are already present
+                    # in the authoritative table and are intentionally ignored.
+                    connection.execute(
+                        """INSERT OR IGNORE INTO traffic_buckets
+                           (id, rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
+                           SELECT id, rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes
+                           FROM traffic_buckets_without_rule_fk"""
+                    )
+                    connection.execute("DROP TABLE traffic_buckets_without_rule_fk")
+                connection.execute("DROP TABLE IF EXISTS traffic_buckets_migration_v2")
+                connection.execute(
+                    """CREATE TABLE traffic_buckets_migration_v2 (
+                           id INTEGER PRIMARY KEY AUTOINCREMENT,
+                           rule_id INTEGER NOT NULL,
+                           owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                           bucket_at TEXT NOT NULL,
+                           inbound_bytes INTEGER NOT NULL DEFAULT 0,
+                           outbound_bytes INTEGER NOT NULL DEFAULT 0,
+                           UNIQUE(rule_id, owner_id, bucket_at)
+                       )"""
+                )
+                connection.execute(
+                    """INSERT INTO traffic_buckets_migration_v2
+                           (rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
+                       SELECT rule_id, owner_id, bucket_at,
+                              SUM(inbound_bytes), SUM(outbound_bytes)
+                       FROM traffic_buckets
+                       GROUP BY rule_id, owner_id, bucket_at"""
+                )
+                connection.execute("DROP TABLE traffic_buckets")
+                connection.execute(
+                    "ALTER TABLE traffic_buckets_migration_v2 RENAME TO traffic_buckets"
+                )
+                connection.execute(
+                    """CREATE INDEX IF NOT EXISTS idx_traffic_owner_time
+                       ON traffic_buckets(owner_id, bucket_at)"""
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
         count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             username = os.environ.get("PANEL_ADMIN_USERNAME", "")
@@ -496,13 +603,25 @@ def _clear_failed_logins(remote_addr: str) -> None:
     get_db().execute("DELETE FROM login_attempts WHERE remote_addr = ?", (remote_addr,))
 
 
-def monthly_usage(connection: sqlite3.Connection, user: sqlite3.Row | dict[str, Any], at: datetime | None = None) -> int:
+def measured_monthly_usage(
+    connection: sqlite3.Connection,
+    user: sqlite3.Row | dict[str, Any],
+    at: datetime | None = None,
+) -> int:
     start = monthly_cycle_start(user, at).strftime(UTC_TIME_FORMAT)
     row = connection.execute(
         "SELECT COALESCE(SUM(inbound_bytes) + SUM(outbound_bytes), 0) FROM traffic_buckets WHERE owner_id=? AND bucket_at>=?",
         (user["id"], start),
     ).fetchone()
     return int(row[0])
+
+
+def monthly_usage(connection: sqlite3.Connection, user: sqlite3.Row | dict[str, Any], at: datetime | None = None) -> int:
+    cycle_start = monthly_cycle_start(user, at).strftime(UTC_TIME_FORMAT)
+    offset = 0
+    if (user["usage_offset_cycle_start"] or "") == cycle_start:
+        offset = int(user["usage_offset_bytes"])
+    return max(0, measured_monthly_usage(connection, user, at) + offset)
 
 
 def desired_pause_reason(user: sqlite3.Row | dict[str, Any], usage: int, at: datetime | None = None) -> str:
@@ -518,6 +637,160 @@ def desired_pause_reason(user: sqlite3.Row | dict[str, Any], usage: int, at: dat
     return ""
 
 
+def desired_rule_pause_reason(
+    rule: sqlite3.Row | dict[str, Any],
+    user: sqlite3.Row | dict[str, Any],
+    usage: int,
+    at: datetime | None = None,
+) -> str:
+    account_reason = desired_pause_reason(user, usage, at)
+    if account_reason:
+        return account_reason
+    if not int(user["port_min"]) <= int(rule["listen_port"]) <= int(user["port_max"]):
+        return "port_range"
+    return ""
+
+
+def queue_firewall_retry(
+    connection: sqlite3.Connection,
+    operation: str,
+    rule: ForwardRule,
+    warnings: list[str],
+    *,
+    rule_id: int | None = None,
+    remove_listen_port: bool = True,
+) -> None:
+    """Persist a failed firewall operation for idempotent background retry."""
+    stored_rule_id = int(rule_id if rule_id is not None else (rule.id or 0))
+    key = (
+        operation,
+        stored_rule_id,
+        rule.listen_port,
+        rule.destination_ip,
+        rule.destination_port,
+        int(remove_listen_port),
+    )
+    if not warnings:
+        connection.execute(
+            """DELETE FROM firewall_retry_jobs
+               WHERE operation=? AND rule_id=? AND listen_port=?
+                 AND destination_ip=? AND destination_port=?
+                 AND remove_listen_port=?""",
+            key,
+        )
+        return
+    error = "; ".join(warnings)[:1000]
+    connection.execute(
+        """INSERT INTO firewall_retry_jobs
+           (operation, rule_id, listen_port, destination_ip, destination_port,
+            remove_listen_port, attempts, last_error, created_at, last_attempt_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+           ON CONFLICT(operation, rule_id, listen_port, destination_ip,
+                       destination_port, remove_listen_port)
+           DO UPDATE SET attempts=firewall_retry_jobs.attempts+1,
+                         last_error=excluded.last_error,
+                         last_attempt_at=excluded.last_attempt_at""",
+        (*key, error, now(), now()),
+    )
+
+
+def process_firewall_retries(
+    connection: sqlite3.Connection,
+    manager: NftManager,
+    active_rules: list[ForwardRule],
+) -> bool:
+    """Retry queued firewall work and discard jobs that are no longer relevant."""
+    jobs = connection.execute("SELECT * FROM firewall_retry_jobs ORDER BY id").fetchall()
+    if not jobs:
+        return False
+    active_by_id = {int(rule.id): rule for rule in active_rules if rule.id is not None}
+    for job in jobs:
+        retry_rule = ForwardRule(
+            id=int(job["rule_id"]) or None,
+            listen_port=int(job["listen_port"]),
+            destination_ip=str(job["destination_ip"]),
+            destination_port=int(job["destination_port"]),
+        )
+        if job["operation"] == "open":
+            current = active_by_id.get(int(job["rule_id"]))
+            if (
+                current is None
+                or current.listen_port != retry_rule.listen_port
+                or (current.destination_ip, current.destination_port)
+                != (retry_rule.destination_ip, retry_rule.destination_port)
+            ):
+                connection.execute("DELETE FROM firewall_retry_jobs WHERE id=?", (job["id"],))
+                continue
+            warnings = manager.firewall_open(current)
+        else:
+            listen_port_in_use = any(
+                item.listen_port == retry_rule.listen_port for item in active_rules
+            )
+            destination_still_used = any(
+                (item.destination_ip, item.destination_port)
+                == (retry_rule.destination_ip, retry_rule.destination_port)
+                for item in active_rules
+            )
+            warnings = manager.firewall_close(
+                retry_rule,
+                destination_still_used,
+                remove_listen_port=bool(job["remove_listen_port"]) and not listen_port_in_use,
+            )
+        if warnings:
+            connection.execute(
+                """UPDATE firewall_retry_jobs
+                   SET attempts=attempts+1, last_error=?, last_attempt_at=?
+                   WHERE id=?""",
+                ("; ".join(warnings)[:1000], now(), job["id"]),
+            )
+        else:
+            connection.execute("DELETE FROM firewall_retry_jobs WHERE id=?", (job["id"],))
+    return True
+
+
+def cached_connection_snapshot() -> dict[str, object]:
+    """Return the latest background snapshot without running conntrack in a request."""
+    with _live_cache_lock:
+        return _connection_cache[1]
+
+
+def cached_probe(address: str, port: int) -> dict[str, Any]:
+    """Return the latest background TCP probe for a target."""
+    with _live_cache_lock:
+        cached = _probe_cache.get((address, port))
+        return cached[1] if cached else {"reachable": False, "latency_ms": None}
+
+
+def refresh_live_observability(app: Flask) -> None:
+    """Refresh conntrack and unchanged TCP latency probes outside web requests."""
+    global _connection_cache
+    connection = sqlite3.connect(app.config["DATABASE"], timeout=15)
+    connection.row_factory = sqlite3.Row
+    try:
+        rules = connection.execute(
+            "SELECT destination_ip, destination_port FROM forward_rules "
+            "WHERE paused_reason='' ORDER BY id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
+    connection_snapshot = manager.connection_snapshot()
+    targets = sorted({(str(row["destination_ip"]), int(row["destination_port"])) for row in rules})
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(targets)))) as executor:
+        results = list(executor.map(lambda target: probe_tcp(target[0], target[1]), targets))
+    sampled_at = time.monotonic()
+    with _live_cache_lock:
+        _connection_cache = (sampled_at, connection_snapshot)
+        _probe_cache.clear()
+        _probe_cache.update(
+            {
+                target: (sampled_at, result)
+                for target, result in zip(targets, results)
+            }
+        )
+
+
 def reconcile_rule_state(app: Flask, at: datetime | None = None, force_apply: bool = False) -> bool:
     """Persist and load only rules whose accounts are currently allowed to forward."""
     connection = sqlite3.connect(app.config["DATABASE"], timeout=15)
@@ -526,34 +799,123 @@ def reconcile_rule_state(app: Flask, at: datetime | None = None, force_apply: bo
     try:
         with ApplyLock(Path(app.config["DATA_DIR"])):
             rows = connection.execute(
-                "SELECT r.*, u.identity_id, u.username, u.active, u.expires_at, u.monthly_quota_bytes, u.monthly_reset_day, u.monthly_reset_minute "
-                "FROM forward_rules r JOIN users u ON u.id=r.owner_id ORDER BY r.listen_port"
+                "SELECT * FROM forward_rules ORDER BY listen_port"
             ).fetchall()
-            if not rows:
-                return False
             manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
+            previously_enabled = [row_to_rule(row) for row in rows if not row["paused_reason"]]
+            retried_firewall = process_firewall_retries(connection, manager, previously_enabled)
+            if not rows:
+                connection.commit()
+                return retried_firewall
             TrafficMonitor(manager).sample(connection, rows)
             check_time = at or datetime.now(timezone.utc)
+            owners = {
+                int(owner["id"]): owner
+                for owner in connection.execute("SELECT * FROM users").fetchall()
+            }
             usage_by_owner: dict[int, int] = {}
             reasons: dict[int, str] = {}
             for row in rows:
                 owner_id = int(row["owner_id"])
+                owner = owners[owner_id]
                 if owner_id not in usage_by_owner:
-                    usage_by_owner[owner_id] = monthly_usage(connection, row, check_time)
-                reasons[int(row["id"])] = desired_pause_reason(row, usage_by_owner[owner_id], check_time)
+                    usage_by_owner[owner_id] = monthly_usage(connection, owner, check_time)
+                reasons[int(row["id"])] = desired_rule_pause_reason(
+                    row,
+                    owner,
+                    usage_by_owner[owner_id],
+                    check_time,
+                )
             changed = [row for row in rows if (row["paused_reason"] or "") != reasons[int(row["id"])]]
             if not changed and not force_apply:
-                return False
+                connection.commit()
+                return retried_firewall
             enabled = [row_to_rule(row) for row in rows if not reasons[int(row["id"])]]
             manager.apply_rules(enabled)
+            reset_counter_baselines(connection, enabled)
+
+            firewall_warnings: dict[int, list[str]] = {}
+            firewall_closed: set[int] = set()
+            if force_apply:
+                for rule in enabled:
+                    if rule.id is not None:
+                        warnings = manager.firewall_open(rule)
+                        firewall_warnings[int(rule.id)] = warnings
+                        queue_firewall_retry(
+                            connection,
+                            "open",
+                            rule,
+                            warnings,
+                            rule_id=int(rule.id),
+                        )
+                for row in rows:
+                    rule_id = int(row["id"])
+                    if not reasons[rule_id]:
+                        continue
+                    previous = row_to_rule(row)
+                    destination_still_used = any(
+                        (item.destination_ip, item.destination_port)
+                        == (previous.destination_ip, previous.destination_port)
+                        for item in enabled
+                    )
+                    warnings = manager.firewall_close(previous, destination_still_used)
+                    firewall_warnings.setdefault(rule_id, []).extend(warnings)
+                    queue_firewall_retry(
+                        connection,
+                        "close",
+                        previous,
+                        warnings,
+                        rule_id=rule_id,
+                    )
+                    firewall_closed.add(rule_id)
+            else:
+                for row in changed:
+                    if not reasons[int(row["id"])]:
+                        rule = row_to_rule(row)
+                        warnings = manager.firewall_open(rule)
+                        firewall_warnings[int(row["id"])] = warnings
+                        queue_firewall_retry(
+                            connection,
+                            "open",
+                            rule,
+                            warnings,
+                            rule_id=int(row["id"]),
+                        )
+
+            for row in changed:
+                rule_id = int(row["id"])
+                if row["paused_reason"] and not reasons[rule_id]:
+                    continue
+                if not row["paused_reason"] and reasons[rule_id] and rule_id not in firewall_closed:
+                    previous = row_to_rule(row)
+                    destination_still_used = any(
+                        (item.destination_ip, item.destination_port)
+                        == (previous.destination_ip, previous.destination_port)
+                        for item in enabled
+                    )
+                    warnings = manager.firewall_close(previous, destination_still_used)
+                    firewall_warnings.setdefault(rule_id, []).extend(warnings)
+                    queue_firewall_retry(
+                        connection,
+                        "close",
+                        previous,
+                        warnings,
+                        rule_id=rule_id,
+                    )
+
             for row in changed:
                 reason = reasons[int(row["id"])]
                 connection.execute("UPDATE forward_rules SET paused_reason=? WHERE id=?", (reason, row["id"]))
                 action = "rule_paused" if reason else "rule_resumed"
-                details = f"{row['listen_port']} → {row['destination_ip']}:{row['destination_port']}; reason={reason or 'policy cleared'}"
+                warnings = "; ".join(firewall_warnings.get(int(row["id"]), []))
+                details = (
+                    f"{row['listen_port']} → {row['destination_ip']}:{row['destination_port']}; "
+                    f"reason={reason or 'policy cleared'}"
+                    + (f"; {warnings}" if warnings else "")
+                )
                 connection.execute(
                     "INSERT INTO audit_events (actor_id, action, target, details, remote_addr, created_at) VALUES (NULL, ?, ?, ?, 'policy-scheduler', ?)",
-                    (action, row["identity_id"], details, now()),
+                    (action, owners[int(row["owner_id"])]["identity_id"], details, now()),
                 )
             connection.commit()
             return True
@@ -567,13 +929,24 @@ def start_policy_scheduler(app: Flask) -> None:
 
     def worker() -> None:
         while True:
+            started = time.monotonic()
             try:
                 reconcile_rule_state(app)
             except Exception:
                 app.logger.exception("Rule policy reconciliation failed")
-            time.sleep(POLICY_INTERVAL_SECONDS)
+            time.sleep(max(0.1, POLICY_INTERVAL_SECONDS - (time.monotonic() - started)))
+
+    def observability_worker() -> None:
+        while True:
+            started = time.monotonic()
+            try:
+                refresh_live_observability(app)
+            except Exception:
+                app.logger.exception("Live connection and latency refresh failed")
+            time.sleep(max(0.1, LIVE_CACHE_SECONDS - (time.monotonic() - started)))
 
     threading.Thread(target=worker, name="nfp-policy-scheduler", daemon=True).start()
+    threading.Thread(target=observability_worker, name="nfp-live-observability", daemon=True).start()
 
 
 def create_app(test_config: dict[str, Any] | None = None) -> Flask:
@@ -710,11 +1083,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             if user["role"] == "admin":
                 inbound_limit = parse_bounded_int(request.form.get("inbound_limit_mbps", "0"), "入站带宽限制", 0, 100000)
                 outbound_limit = parse_bounded_int(request.form.get("outbound_limit_mbps", "0"), "出站带宽限制", 0, 100000)
+                uses_owner_defaults = 0
             else:
                 inbound_limit = int(owner["default_inbound_mbps"])
                 outbound_limit = int(owner["default_outbound_mbps"])
-            owner_usage = monthly_usage(get_db(), owner)
-            initial_pause = desired_pause_reason(owner, owner_usage)
+                uses_owner_defaults = 1
             note = validate_rule_note(request.form.get("note", ""))
             new_rule = ForwardRule(
                 id=None,
@@ -733,15 +1106,34 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 existing = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
                 if any(item["listen_port"] == new_rule.listen_port for item in existing):
                     raise NftOperationError(f"监听端口 {new_rule.listen_port} 已有转发规则。")
+                if existing:
+                    TrafficMonitor(manager).sample(connection, existing)
+                owner = connection.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone()
+                owner_usage = monthly_usage(connection, owner)
+                initial_pause = desired_pause_reason(owner, owner_usage)
                 candidates = [row_to_rule(item) for item in existing if not item["paused_reason"]]
                 if not initial_pause:
                     candidates.append(new_rule)
                 manager.apply_rules(candidates)
                 cursor = connection.execute(
-                    "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, paused_reason, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (new_rule.listen_port, new_rule.destination_ip, new_rule.destination_port, owner_id, inbound_limit, outbound_limit, initial_pause, note, now()),
+                    "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, uses_owner_defaults, paused_reason, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_rule.listen_port, new_rule.destination_ip, new_rule.destination_port, owner_id, inbound_limit, outbound_limit, uses_owner_defaults, initial_pause, note, now()),
+                )
+                reset_counter_baselines(
+                    connection,
+                    connection.execute(
+                        "SELECT id FROM forward_rules WHERE paused_reason='' ORDER BY listen_port"
+                    ).fetchall(),
                 )
                 warnings = manager.firewall_open(new_rule) if not initial_pause else []
+                if not initial_pause:
+                    queue_firewall_retry(
+                        connection,
+                        "open",
+                        new_rule,
+                        warnings,
+                        rule_id=int(cursor.lastrowid),
+                    )
                 add_audit("rule_create", str(cursor.lastrowid), f"{new_rule.listen_port} → {new_rule.destination_ip}:{new_rule.destination_port}; owner={owner['username']}; note={note or '(empty)'}; paused={initial_pause or 'no'}; {'; '.join(warnings)}")
                 connection.commit()
             if initial_pause:
@@ -788,9 +1180,15 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 if user["role"] == "admin":
                     inbound_limit = parse_bounded_int(request.form.get("inbound_limit_mbps", "0"), "入站带宽限制", 0, 100000)
                     outbound_limit = parse_bounded_int(request.form.get("outbound_limit_mbps", "0"), "出站带宽限制", 0, 100000)
+                    uses_owner_defaults = 0
                 else:
-                    inbound_limit = int(owner["default_inbound_mbps"])
-                    outbound_limit = int(owner["default_outbound_mbps"])
+                    uses_owner_defaults = int(current["uses_owner_defaults"])
+                    if uses_owner_defaults:
+                        inbound_limit = int(owner["default_inbound_mbps"])
+                        outbound_limit = int(owner["default_outbound_mbps"])
+                    else:
+                        inbound_limit = int(current["inbound_limit_mbps"])
+                        outbound_limit = int(current["outbound_limit_mbps"])
                 note = validate_rule_note(request.form.get("note", ""))
                 updated = ForwardRule(
                     id=rule_id,
@@ -801,32 +1199,68 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     inbound_limit_mbps=inbound_limit,
                     outbound_limit_mbps=outbound_limit,
                 )
-                pause_reason = desired_pause_reason(owner, monthly_usage(connection, owner))
                 all_rows = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
+                if all_rows:
+                    TrafficMonitor(manager).sample(connection, all_rows)
+                pause_reason = desired_pause_reason(owner, monthly_usage(connection, owner))
                 candidates = [row_to_rule(row) for row in all_rows if int(row["id"]) != rule_id and not row["paused_reason"]]
                 if not pause_reason:
                     candidates.append(updated)
                 manager.apply_rules(candidates)
+                reset_counter_baselines(connection, candidates)
 
                 previous = row_to_rule(current)
-                connection.execute(
-                    """UPDATE forward_rules SET listen_port=?, destination_ip=?, destination_port=?, owner_id=?,
-                       inbound_limit_mbps=?, outbound_limit_mbps=?, paused_reason=?, note=? WHERE id=?""",
-                    (listen_port, updated.destination_ip, updated.destination_port, owner_id,
-                     inbound_limit, outbound_limit, pause_reason, note, rule_id),
-                )
-                connection.execute("DELETE FROM rule_counter_state WHERE rule_id=?", (rule_id,))
-                warnings = manager.firewall_open(updated) if not pause_reason else []
-                old_destination_used = any(
-                    int(row["id"]) != rule_id and row["destination_ip"] == previous.destination_ip
-                    and int(row["destination_port"]) == previous.destination_port for row in all_rows
-                )
+                was_active = not bool(current["paused_reason"])
+                will_be_active = not bool(pause_reason)
                 firewall_target_changed = (
                     previous.listen_port != updated.listen_port
                     or (previous.destination_ip, previous.destination_port) != (updated.destination_ip, updated.destination_port)
                 )
-                if firewall_target_changed:
-                    warnings.extend(manager.firewall_close(previous, old_destination_used))
+                connection.execute(
+                    """UPDATE forward_rules SET listen_port=?, destination_ip=?, destination_port=?, owner_id=?,
+                       inbound_limit_mbps=?, outbound_limit_mbps=?, uses_owner_defaults=?,
+                       paused_reason=?, note=? WHERE id=?""",
+                    (listen_port, updated.destination_ip, updated.destination_port, owner_id,
+                     inbound_limit, outbound_limit, uses_owner_defaults, pause_reason, note, rule_id),
+                )
+                warnings: list[str] = []
+                if will_be_active and (not was_active or firewall_target_changed):
+                    operation_warnings = manager.firewall_open(updated)
+                    warnings.extend(operation_warnings)
+                    queue_firewall_retry(
+                        connection,
+                        "open",
+                        updated,
+                        operation_warnings,
+                        rule_id=rule_id,
+                    )
+                should_close_previous = (
+                    (was_active and (not will_be_active or firewall_target_changed))
+                    or (not was_active and firewall_target_changed)
+                )
+                if should_close_previous:
+                    old_destination_used = any(
+                        (rule.destination_ip, rule.destination_port)
+                        == (previous.destination_ip, previous.destination_port)
+                        for rule in candidates
+                    )
+                    remove_old_listen_port = (
+                        not will_be_active or previous.listen_port != updated.listen_port
+                    )
+                    operation_warnings = manager.firewall_close(
+                        previous,
+                        old_destination_used,
+                        remove_listen_port=remove_old_listen_port,
+                    )
+                    warnings.extend(operation_warnings)
+                    queue_firewall_retry(
+                        connection,
+                        "close",
+                        previous,
+                        operation_warnings,
+                        rule_id=rule_id,
+                        remove_listen_port=remove_old_listen_port,
+                    )
                 add_audit(
                     "rule_update", str(rule_id),
                     f"{previous.listen_port} → {previous.destination_ip}:{previous.destination_port}; "
@@ -857,14 +1291,24 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     abort(403)
                 removed = row_to_rule(row)
                 all_rules = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
+                if all_rules:
+                    TrafficMonitor(manager).sample(connection, all_rules)
                 remaining = [row_to_rule(item) for item in all_rules if item["id"] != rule_id and not item["paused_reason"]]
                 manager.apply_rules(remaining)
+                reset_counter_baselines(connection, remaining)
                 shared_destination = any(
                     item.destination_ip == removed.destination_ip and item.destination_port == removed.destination_port
                     for item in remaining
                 )
                 connection.execute("DELETE FROM forward_rules WHERE id = ?", (rule_id,))
                 warnings = manager.firewall_close(removed, shared_destination)
+                queue_firewall_retry(
+                    connection,
+                    "close",
+                    removed,
+                    warnings,
+                    rule_id=rule_id,
+                )
                 add_audit("rule_delete", str(rule_id), f"{removed.listen_port} → {removed.destination_ip}:{removed.destination_port}; {'; '.join(warnings)}")
                 connection.commit()
             flash("端口转发已删除。" + (" " + " ".join(warnings) if warnings else ""), "success")
@@ -925,13 +1369,38 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             flash("至少需要保留一个启用的管理员。", "error")
         else:
             next_state = 0 if target["active"] else 1
-            connection.execute("UPDATE users SET active = ?, session_version = session_version + 1 WHERE id = ?", (next_state, user_id))
-            add_audit("user_toggle", target["identity_id"], f"username={target['username']}; active={next_state}; internal_id={user_id}")
-            connection.commit()
+            expected_session_version = int(target["session_version"]) + 1
+            with ApplyLock(Path(app.config["DATA_DIR"])):
+                connection.execute(
+                    "UPDATE users SET active = ?, session_version = session_version + 1 WHERE id = ?",
+                    (next_state, user_id),
+                )
+                add_audit("user_toggle", target["identity_id"], f"username={target['username']}; active={next_state}; internal_id={user_id}")
+                connection.commit()
             try:
                 reconcile_rule_state(app, force_apply=True)
-            except NftOperationError as exc:
-                flash(f"账户状态已更新，但转发规则重载失败：{exc}", "error")
+            except Exception as exc:
+                with ApplyLock(Path(app.config["DATA_DIR"])):
+                    restored = connection.execute(
+                        """UPDATE users
+                           SET active=?, session_version=session_version+1
+                           WHERE id=? AND active=? AND session_version=?""",
+                        (target["active"], user_id, next_state, expected_session_version),
+                    ).rowcount
+                    if restored:
+                        add_audit(
+                            "user_toggle_rollback",
+                            target["identity_id"],
+                            f"username={target['username']}; restore_active={target['active']}; error={exc}",
+                        )
+                    connection.commit()
+                try:
+                    reconcile_rule_state(app, force_apply=True)
+                except Exception:
+                    app.logger.exception("Failed to restore forwarding state after rolling back an account toggle")
+                if not isinstance(exc, NftOperationError):
+                    app.logger.exception("Unexpected account toggle reconciliation failure")
+                flash("账户状态更新失败，已恢复原状态；请检查 nftables 与防火墙。", "error")
             else:
                 flash("账户状态和转发规则已更新。", "success")
         return redirect(url_for("users"))
@@ -947,6 +1416,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             inbound = parse_bounded_int(request.form.get("default_inbound_mbps"), "默认入站带宽限制", 0, 100000)
             outbound = parse_bounded_int(request.form.get("default_outbound_mbps"), "默认出站带宽限制", 0, 100000)
             quota_gib = parse_bounded_float(request.form.get("monthly_quota_gib"), "月流量额度", 0, 1048576)
+            used_traffic_raw = request.form.get("used_traffic_gib")
             expires_at = validate_expiry(request.form.get("expires_at", ""))
             reset_day, reset_minute = validate_reset_schedule(request.form.get("monthly_reset_day", "1"), request.form.get("monthly_reset_time", "00:00"))
             entry_address = validate_entry_address(request.form.get("entry_address", ""))
@@ -954,45 +1424,139 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 raise ValueError("端口范围起始值不能大于结束值。")
             quota_bytes = int(quota_gib * 1024 ** 3)
             connection = get_db()
-            target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            if target is None:
-                raise ValueError("账户不存在。")
-            previous_policy = dict(target)
-            previous_limits = connection.execute(
-                "SELECT id, inbound_limit_mbps, outbound_limit_mbps FROM forward_rules WHERE owner_id=?",
-                (user_id,),
-            ).fetchall()
-            connection.execute(
-                "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, monthly_reset_minute=?, entry_address=? WHERE id=?",
-                (max_rules, port_min, port_max, inbound, outbound, quota_bytes, expires_at, reset_day, reset_minute, entry_address, user_id),
-            )
-            connection.execute(
-                "UPDATE forward_rules SET inbound_limit_mbps=?, outbound_limit_mbps=? WHERE owner_id=?",
-                (inbound, outbound, user_id),
-            )
-            connection.commit()
-            try:
-                reconcile_rule_state(app, force_apply=True)
-            except NftOperationError:
-                connection.execute(
-                    "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, monthly_reset_minute=?, entry_address=? WHERE id=?",
-                    (previous_policy["max_rules"], previous_policy["port_min"], previous_policy["port_max"],
-                     previous_policy["default_inbound_mbps"], previous_policy["default_outbound_mbps"],
-                     previous_policy["monthly_quota_bytes"], previous_policy["expires_at"],
-                     previous_policy["monthly_reset_day"], previous_policy["monthly_reset_minute"],
-                     previous_policy["entry_address"], user_id),
+            with ApplyLock(Path(app.config["DATA_DIR"])):
+                all_rules = connection.execute(
+                    "SELECT * FROM forward_rules ORDER BY listen_port"
+                ).fetchall()
+                if all_rules:
+                    manager = NftManager(
+                        app.config["FORWARD_CONFIG"],
+                        app.config["MAIN_CONFIG"],
+                        app.config["SYSCTL_CONFIG"],
+                    )
+                    TrafficMonitor(manager).sample(connection, all_rules)
+                calibration_time = datetime.now(timezone.utc)
+                target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+                if target is None:
+                    raise ValueError("账户不存在。")
+                current_usage_bytes = monthly_usage(connection, target, calibration_time)
+                if used_traffic_raw is None:
+                    desired_usage_bytes = current_usage_bytes
+                else:
+                    used_traffic_gib = parse_bounded_float(
+                        used_traffic_raw,
+                        "本周期已用流量",
+                        0,
+                        1048576,
+                    )
+                    desired_usage_bytes = int(used_traffic_gib * 1024 ** 3)
+
+                prospective_policy = dict(target)
+                prospective_policy["monthly_reset_day"] = reset_day
+                prospective_policy["monthly_reset_minute"] = reset_minute
+                usage_cycle_start = monthly_cycle_start(
+                    prospective_policy,
+                    calibration_time,
+                ).strftime(UTC_TIME_FORMAT)
+                measured_usage_bytes = measured_monthly_usage(
+                    connection,
+                    prospective_policy,
+                    calibration_time,
                 )
-                connection.executemany(
-                    "UPDATE forward_rules SET inbound_limit_mbps=?, outbound_limit_mbps=? WHERE id=?",
-                    [(row["inbound_limit_mbps"], row["outbound_limit_mbps"], row["id"]) for row in previous_limits],
+                usage_offset_bytes = desired_usage_bytes - measured_usage_bytes
+
+                previous_policy = dict(target)
+                applied_policy_version = int(previous_policy["policy_version"]) + 1
+                connection.execute(
+                    "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, "
+                    "default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, "
+                    "monthly_reset_minute=?, entry_address=?, usage_offset_bytes=?, "
+                    "usage_offset_cycle_start=?, policy_version=policy_version+1 WHERE id=?",
+                    (
+                        max_rules,
+                        port_min,
+                        port_max,
+                        inbound,
+                        outbound,
+                        quota_bytes,
+                        expires_at,
+                        reset_day,
+                        reset_minute,
+                        entry_address,
+                        usage_offset_bytes,
+                        usage_cycle_start,
+                        user_id,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE forward_rules SET inbound_limit_mbps=?, outbound_limit_mbps=? "
+                    "WHERE owner_id=? AND uses_owner_defaults=1",
+                    (inbound, outbound, user_id),
                 )
                 connection.commit()
+            try:
+                reconcile_rule_state(app, force_apply=True)
+            except Exception as exc:
+                with ApplyLock(Path(app.config["DATA_DIR"])):
+                    restored = connection.execute(
+                        "UPDATE users SET max_rules=?, port_min=?, port_max=?, default_inbound_mbps=?, "
+                        "default_outbound_mbps=?, monthly_quota_bytes=?, expires_at=?, monthly_reset_day=?, "
+                        "monthly_reset_minute=?, entry_address=?, usage_offset_bytes=?, "
+                        "usage_offset_cycle_start=?, policy_version=policy_version+1 "
+                        "WHERE id=? AND policy_version=?",
+                        (
+                            previous_policy["max_rules"],
+                            previous_policy["port_min"],
+                            previous_policy["port_max"],
+                            previous_policy["default_inbound_mbps"],
+                            previous_policy["default_outbound_mbps"],
+                            previous_policy["monthly_quota_bytes"],
+                            previous_policy["expires_at"],
+                            previous_policy["monthly_reset_day"],
+                            previous_policy["monthly_reset_minute"],
+                            previous_policy["entry_address"],
+                            previous_policy["usage_offset_bytes"],
+                            previous_policy["usage_offset_cycle_start"],
+                            user_id,
+                            applied_policy_version,
+                        ),
+                    ).rowcount
+                    if restored:
+                        # Only rules that still belong to this account and
+                        # still opt into its defaults may be rolled back.
+                        # This also covers rules created during the apply
+                        # window without overwriting concurrently customised
+                        # or transferred rules.
+                        connection.execute(
+                            """UPDATE forward_rules
+                               SET inbound_limit_mbps=?, outbound_limit_mbps=?
+                               WHERE owner_id=? AND uses_owner_defaults=1""",
+                            (
+                                previous_policy["default_inbound_mbps"],
+                                previous_policy["default_outbound_mbps"],
+                                user_id,
+                            ),
+                        )
+                    connection.commit()
                 try:
                     reconcile_rule_state(app, force_apply=True)
-                except NftOperationError:
+                except Exception:
                     app.logger.exception("Failed to restore nftables after rolling back a user policy update")
-                raise
-            add_audit("user_policy", target["identity_id"], f"username={target['username']}; rules={max_rules}; ports={port_min}-{port_max}; in={inbound}; out={outbound}; monthly_quota_bytes={quota_bytes}; expires_at={expires_at or 'never'}; monthly_reset={reset_day}/{reset_minute}; entry_address={entry_address or '(unset)'}")
+                if not isinstance(exc, NftOperationError):
+                    app.logger.exception("Unexpected user policy reconciliation failure")
+                if restored:
+                    raise NftOperationError(f"用户策略未能应用，已恢复原策略：{exc}") from exc
+                raise NftOperationError(
+                    "用户策略未能应用；检测到较新的并发修改，已保留较新策略。"
+                ) from exc
+            add_audit(
+                "user_policy",
+                target["identity_id"],
+                f"username={target['username']}; rules={max_rules}; ports={port_min}-{port_max}; "
+                f"in={inbound}; out={outbound}; monthly_quota_bytes={quota_bytes}; "
+                f"used_traffic_bytes={desired_usage_bytes}; expires_at={expires_at or 'never'}; "
+                f"monthly_reset={reset_day}/{reset_minute}; entry_address={entry_address or '(unset)'}",
+            )
             connection.commit()
             flash("用户转发策略已更新，到期和额度状态已重新核算。", "success")
         except (ValueError, NftOperationError) as exc:
@@ -1032,14 +1596,27 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         user = current_user()
         connection = get_db()
         rules = visible_rules(connection, user)
-        manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
-        with ApplyLock(Path(app.config["DATA_DIR"])):
-            live = TrafficMonitor(manager).sample(connection, rules)
-        connection_snapshot = manager.connection_snapshot()
+        live = {
+            int(row["rule_id"]): {
+                "inbound_bps": float(row["inbound_bps"]),
+                "outbound_bps": float(row["outbound_bps"]),
+            }
+            for row in connection.execute(
+                "SELECT rule_id, inbound_bps, outbound_bps FROM rule_counter_state"
+            ).fetchall()
+        }
+        connection_snapshot = cached_connection_snapshot()
         connections = connection_snapshot["ports"]
         rows = []
         with ThreadPoolExecutor(max_workers=min(16, max(1, len(rules)))) as executor:
-            probes = list(executor.map(lambda item: probe_tcp(item["destination_ip"], int(item["destination_port"])) if not item["paused_reason"] else {"reachable": False, "latency_ms": None}, rules))
+            probes = list(
+                executor.map(
+                    lambda item: cached_probe(item["destination_ip"], int(item["destination_port"]))
+                    if not item["paused_reason"]
+                    else {"reachable": False, "latency_ms": None},
+                    rules,
+                )
+            )
         for rule, reachability in zip(rules, probes):
             rows.append({
                 "id": rule["id"], "owner": rule["owner_name"], "listen_port": rule["listen_port"],
