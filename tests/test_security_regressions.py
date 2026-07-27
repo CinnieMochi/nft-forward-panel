@@ -39,7 +39,7 @@ class SecurityRegressionTests(unittest.TestCase):
         try:
             connection.execute(
                 "INSERT INTO users(identity_id, username, email, password_hash, role, active, created_at) VALUES (?, ?, ?, ?, 'user', 1, ?)",
-                ("usr_" + "1" * 32, "member", "member@example.com", generate_password_hash("MemberPass!2026"), "2026-01-01 00:00:00 UTC"),
+                ("A1B2C3D4", "member", "member@example.com", generate_password_hash("MemberPass!2026"), "2026-01-01 00:00:00 UTC"),
             )
             connection.commit()
         finally:
@@ -81,7 +81,7 @@ class SecurityRegressionTests(unittest.TestCase):
         try:
             connection.execute(
                 "INSERT INTO users(identity_id, username, email, password_hash, role, active, created_at) VALUES (?, ?, ?, ?, 'user', 1, ?)",
-                ("usr_" + "2" * 32, "member@example.com", "legacy@example.com", generate_password_hash("LegacyPass!2026"), "2026-01-01 00:00:00 UTC"),
+                ("B5C6D7E8", "member@example.com", "legacy@example.com", generate_password_hash("LegacyPass!2026"), "2026-01-01 00:00:00 UTC"),
             )
             connection.commit()
         finally:
