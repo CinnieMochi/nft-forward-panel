@@ -246,21 +246,24 @@ class NftManager:
             counters[port]["inbound" if direction == "in" else "outbound"] += total
         return counters
 
-    def connection_counts(self) -> dict[int, int]:
-        """Count tracked TCP/UDP flows by original local destination port."""
+    def connection_snapshot(self) -> dict[str, object]:
+        """Count tracked flows by listening port and transport protocol."""
         if not shutil.which("conntrack"):
-            return {}
+            return {"ports": {}, "tcp_ports": {}, "udp_ports": {}}
         result = self._run(["conntrack", "-L", "-f", "ipv4", "-o", "extended"], check=False)
         if result.returncode not in (0, 1):
-            return {}
+            return {"ports": {}, "tcp_ports": {}, "udp_ports": {}}
         counts: dict[int, int] = {}
+        protocol_ports: dict[str, dict[int, int]] = {"tcp": {}, "udp": {}}
         for line in result.stdout.splitlines():
             # Depending on conntrack-tools version, extended output starts
             # with either "tcp/udp" or an address-family prefix such as
             # "ipv4 2 tcp/udp".
-            if not re.match(r"^(?:(?:ipv4|ipv6)\s+\d+\s+)?(?:tcp|udp)\s", line):
+            protocol_match = re.match(r"^(?:(?:ipv4|ipv6)\s+\d+\s+)?(tcp|udp)\s", line)
+            if not protocol_match:
                 continue
-            if re.match(r"^(?:(?:ipv4|ipv6)\s+\d+\s+)?tcp\s", line) and re.search(r"\bTIME_WAIT\b", line):
+            protocol = protocol_match.group(1)
+            if protocol == "tcp" and re.search(r"\bTIME_WAIT\b", line):
                 continue
             # The first tuple is the original direction, before DNAT. Its
             # destination port is the panel's local listening port.
@@ -272,7 +275,12 @@ class NftManager:
             if match:
                 port = int(match.group(1))
                 counts[port] = counts.get(port, 0) + 1
-        return counts
+                protocol_ports[protocol][port] = protocol_ports[protocol].get(port, 0) + 1
+        return {"ports": counts, "tcp_ports": protocol_ports["tcp"], "udp_ports": protocol_ports["udp"]}
+
+    def connection_counts(self) -> dict[int, int]:
+        """Count tracked TCP/UDP flows by original local destination port."""
+        return self.connection_snapshot()["ports"]
 
     def _ensure_main_include(self) -> None:
         include = f'include "{self.forward_config.parent}/*.conf"'
