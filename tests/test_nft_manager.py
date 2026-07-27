@@ -96,6 +96,9 @@ class ValidationTests(unittest.TestCase):
         ))
         manager._run = lambda *args, **kwargs: CompletedProcess([], 0, output, "")
         self.assertEqual(manager.connection_counts(), {10110: 2})
+        self.assertEqual(manager.connection_snapshot(), {
+            "ports": {10110: 2}, "tcp_ports": {10110: 1}, "udp_ports": {10110: 1},
+        })
 
 
 if __name__ == "__main__":
