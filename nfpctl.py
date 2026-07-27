@@ -165,7 +165,8 @@ def get_owner(connection: sqlite3.Connection, username: str | None) -> sqlite3.R
 
 
 def add_rule(app: Any, args: argparse.Namespace) -> None:
-    from app import ApplyLock, desired_pause_reason, monthly_usage, now, row_to_rule
+    from app import ApplyLock, desired_pause_reason, monthly_usage, now, queue_firewall_retry, row_to_rule
+    from monitoring import TrafficMonitor, reset_counter_baselines
     from nft_manager import ForwardRule, NftOperationError
 
     connection = db_connect(app)
@@ -182,9 +183,9 @@ def add_rule(app: Any, args: argparse.Namespace) -> None:
             fail(f"owner {owner['username']} has reached the rule limit")
         inbound = int(owner["default_inbound_mbps"]) if args.inbound_mbps is None else args.inbound_mbps
         outbound = int(owner["default_outbound_mbps"]) if args.outbound_mbps is None else args.outbound_mbps
+        uses_owner_defaults = int(args.inbound_mbps is None and args.outbound_mbps is None)
         if not 0 <= inbound <= 100000 or not 0 <= outbound <= 100000:
             fail("bandwidth limits must be between 0 and 100000 Mbps")
-        pause_reason = desired_pause_reason(owner, monthly_usage(connection, owner))
         new_rule = ForwardRule(None, port, target, target_port, int(owner["id"]), inbound, outbound)
         if manager.listening_port_in_use(port) and not args.force_port_conflict:
             fail("local port is in use; inspect it first and re-run with --force-port-conflict only when intended")
@@ -192,15 +193,33 @@ def add_rule(app: Any, args: argparse.Namespace) -> None:
             existing = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
             if any(int(item["listen_port"]) == port for item in existing):
                 fail(f"listening port {port} already has a managed rule")
+            if existing:
+                TrafficMonitor(manager).sample(connection, existing)
+            owner = connection.execute("SELECT * FROM users WHERE id=?", (owner["id"],)).fetchone()
+            pause_reason = desired_pause_reason(owner, monthly_usage(connection, owner))
             candidates = [row_to_rule(item) for item in existing if not item["paused_reason"]]
             if not pause_reason:
                 candidates.append(new_rule)
             manager.apply_rules(candidates)
             cursor = connection.execute(
-                "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, paused_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (port, target, target_port, owner["id"], inbound, outbound, pause_reason, now()),
+                "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, inbound_limit_mbps, outbound_limit_mbps, uses_owner_defaults, paused_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (port, target, target_port, owner["id"], inbound, outbound, uses_owner_defaults, pause_reason, now()),
+            )
+            reset_counter_baselines(
+                connection,
+                connection.execute(
+                    "SELECT id FROM forward_rules WHERE paused_reason='' ORDER BY listen_port"
+                ).fetchall(),
             )
             warnings = manager.firewall_open(new_rule) if not pause_reason else []
+            if not pause_reason:
+                queue_firewall_retry(
+                    connection,
+                    "open",
+                    new_rule,
+                    warnings,
+                    rule_id=int(cursor.lastrowid),
+                )
             audit(connection, "rule_create_ssh", str(cursor.lastrowid), f"{port} -> {target}:{target_port}; owner={owner['username']}")
             connection.commit()
         print(f"Added rule #{cursor.lastrowid}: {port} -> {target}:{target_port} ({owner['username']})")
@@ -214,7 +233,8 @@ def add_rule(app: Any, args: argparse.Namespace) -> None:
 
 
 def remove_rule(app: Any, rule_id: int, confirmed: bool) -> None:
-    from app import ApplyLock, row_to_rule
+    from app import ApplyLock, queue_firewall_retry, row_to_rule
+    from monitoring import TrafficMonitor, reset_counter_baselines
     from nft_manager import NftOperationError
 
     connection = db_connect(app)
@@ -228,15 +248,28 @@ def remove_rule(app: Any, rule_id: int, confirmed: bool) -> None:
             return
         with ApplyLock(Path(app.config["DATA_DIR"])):
             all_rules = connection.execute("SELECT * FROM forward_rules ORDER BY listen_port").fetchall()
+            if all_rules:
+                TrafficMonitor(manager).sample(connection, all_rules)
             remaining_rows = [item for item in all_rules if int(item["id"]) != rule_id]
-            manager.apply_rules([row_to_rule(item) for item in remaining_rows if not item["paused_reason"]])
+            remaining = [
+                row_to_rule(item) for item in remaining_rows if not item["paused_reason"]
+            ]
+            manager.apply_rules(remaining)
+            reset_counter_baselines(connection, remaining)
             removed = row_to_rule(row)
             shared_destination = any(
                 item["destination_ip"] == removed.destination_ip and int(item["destination_port"]) == removed.destination_port
-                for item in remaining_rows
+                for item in remaining_rows if not item["paused_reason"]
             )
             connection.execute("DELETE FROM forward_rules WHERE id=?", (rule_id,))
             warnings = manager.firewall_close(removed, shared_destination)
+            queue_firewall_retry(
+                connection,
+                "close",
+                removed,
+                warnings,
+                rule_id=rule_id,
+            )
             audit(connection, "rule_delete_ssh", str(rule_id), f"{removed.listen_port} -> {removed.destination_ip}:{removed.destination_port}")
             connection.commit()
         print(f"Removed rule #{rule_id}.")
@@ -258,14 +291,25 @@ def clear_rules(app: Any, confirmed: bool) -> None:
         if not rows:
             print("No managed forwarding rules.")
             return
-        from app import ApplyLock, row_to_rule
+        from app import ApplyLock, queue_firewall_retry, row_to_rule
+        from monitoring import TrafficMonitor, reset_counter_baselines
         from nft_manager import NftOperationError
         manager = manager_for(app)
         with ApplyLock(Path(app.config["DATA_DIR"])):
+            TrafficMonitor(manager).sample(connection, rows)
             manager.apply_rules([])
+            reset_counter_baselines(connection, [])
             connection.execute("DELETE FROM forward_rules")
             for row in rows:
-                warnings = manager.firewall_close(row_to_rule(row), False)
+                removed = row_to_rule(row)
+                warnings = manager.firewall_close(removed, False)
+                queue_firewall_retry(
+                    connection,
+                    "close",
+                    removed,
+                    warnings,
+                    rule_id=int(row["id"]),
+                )
                 for warning in warnings:
                     print(f"Warning: {warning}", file=sys.stderr)
             audit(connection, "rule_clear_ssh", "all", f"removed={len(rows)}")
@@ -340,6 +384,8 @@ def main() -> None:
     preliminary.add_argument("--env-file", default=os.environ.get("PANEL_ENV_FILE", DEFAULT_ENV_FILE))
     preliminary_args, _ = preliminary.parse_known_args()
     load_env_file(preliminary_args.env_file)
+    # A one-shot CLI process must never start the background policy sampler.
+    os.environ["PANEL_POLICY_SCHEDULER"] = "0"
 
     parser = build_parser()
     args = parser.parse_args()
