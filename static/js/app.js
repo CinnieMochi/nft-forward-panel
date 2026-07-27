@@ -16,13 +16,15 @@
     return `${number < 10 && index ? number.toFixed(2) : number.toFixed(index ? 1 : 0)} ${units[index]}${suffix}`;
   };
 
+  const GAUGE_ARC_LENGTH = 75;
+  const gaugeDashArray = (progress) => `${(Math.min(1, Math.max(0, Number(progress) || 0)) * GAUGE_ARC_LENGTH).toFixed(2)} 100`;
   const gaugeState = new WeakMap();
   const gaugeTone = (value, low, medium) => (value <= low ? "gauge-green" : (value <= medium ? "gauge-orange" : "gauge-red"));
   const paintGauge = (gauge, progress, tone) => {
     gauge.classList.remove("gauge-green", "gauge-orange", "gauge-red");
     gauge.classList.add(tone);
     const arc = gauge.querySelector(".gauge-value");
-    if (arc) arc.setAttribute("stroke-dasharray", `${(Math.min(1, Math.max(0, progress)) * 70).toFixed(2)} 100`);
+    if (arc) arc.setAttribute("stroke-dasharray", gaugeDashArray(progress));
   };
   const formatMbps = (mbps) => {
     if (mbps >= 100) return Math.round(mbps).toString();
