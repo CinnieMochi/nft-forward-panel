@@ -3,7 +3,7 @@
 {% block title %}{{ titles[kind] }} · Mochi Forward{% endblock %}{% block page_name %}{{ titles[kind] }}{% endblock %}
 {% block content %}
 <section class="page-heading">
-  <div><p class="eyebrow">MONITORING</p><h1>{{ titles[kind] }}</h1><p class="muted">{{ '查看实时速率及分级归档趋势。' if kind == 'bandwidth' else '查看整点区间的入站与出站流量消耗。' if kind == 'traffic' else '展示每条转发规则当前活跃连接数。' }}</p></div>
+  <div><p class="eyebrow">MONITORING</p><h1>{{ titles[kind] }}</h1><p class="muted">{{ '按本机网卡方向查看 RX / TX 实时速率及归档趋势。' if kind == 'bandwidth' else '按本机网卡方向查看整点区间的 RX 与 TX 流量消耗。' if kind == 'traffic' else '展示每条转发规则当前活跃连接数。' }}</p></div>
   {% if kind != 'connections' %}<div class="segmented" data-range data-kind="{{ kind }}">{% if kind == 'bandwidth' %}<button class="active" data-range-value="live">实时</button>{% endif %}<button class="{{ 'active' if kind == 'traffic' else '' }}" data-range-value="1">24 小时</button><button data-range-value="7">7 天</button><button data-range-value="30">30 天</button></div>{% endif %}
 </section>
 <section class="metric-grid compact live-overview analytics-overview" data-overview-url="{{ url_for('overview_api') }}" data-analytics-kind="{{ kind }}">
@@ -13,22 +13,22 @@
   <div class="metric-card"><span>转发规则总数</span><strong data-metric="rule-count">0</strong></div>
   <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% elif kind == 'traffic' %}
-  <div class="metric-card"><span>上一整点入站</span><strong data-metric="previous-hour-inbound">0 B</strong></div>
-  <div class="metric-card"><span>上一整点出站</span><strong data-metric="previous-hour-outbound">0 B</strong></div>
+  <div class="metric-card"><span>上一整点 RX 入站</span><strong data-metric="previous-hour-rx">0 B</strong></div>
+  <div class="metric-card"><span>上一整点 TX 出站</span><strong data-metric="previous-hour-tx">0 B</strong></div>
   <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
   <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% else %}
-  <div class="metric-card"><span>实时入站</span><strong data-metric="inbound">0 B/s</strong></div>
-  <div class="metric-card"><span>实时出站</span><strong data-metric="outbound">0 B/s</strong></div>
+  <div class="metric-card"><span>实时 RX 入站</span><strong data-metric="rx">0 B/s</strong></div>
+  <div class="metric-card"><span>实时 TX 出站</span><strong data-metric="tx">0 B/s</strong></div>
   <div class="metric-card"><span>本月流量</span><strong data-metric="monthly">0 B</strong></div>
   <div class="metric-card connections-card"><span>当前连接</span><strong data-metric="connections">0</strong><svg class="connections-sparkline" data-connections-sparkline viewBox="0 0 76 38" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path class="sparkline-area"></path><path class="sparkline-line"></path></svg></div>
   {% endif %}
 </section>
 {% if kind != 'connections' %}
 <section class="panel chart-panel" data-history-url="{{ url_for('history_api') }}" data-chart-kind="{{ kind }}">
-  <div class="panel-heading"><div><h2>{{ '入站 / 出站带宽趋势' if kind == 'bandwidth' else '区间流量消耗' }}</h2><p data-chart-caption>{{ '当前实时' if kind == 'bandwidth' else '最近 24 小时' }}</p></div><div class="legend"><span class="in">入站</span><span class="out">出站</span></div></div>
+  <div class="panel-heading"><div><h2>{{ 'RX 入站 / TX 出站带宽趋势' if kind == 'bandwidth' else 'RX / TX 区间流量消耗' }}</h2><p data-chart-caption>{{ '当前实时' if kind == 'bandwidth' else '最近 24 小时' }}</p></div><div class="legend"><span class="in">RX 入站</span><span class="out">TX 出站</span></div></div>
   <div class="chart-wrap"><canvas id="history-chart" aria-label="{{ titles[kind] }}图表"></canvas><div class="chart-empty">暂无统计数据</div></div>
-  <div class="history-table table-wrap"><table><thead><tr><th>时间区间</th><th>入站</th><th>出站</th><th>总计</th></tr></thead><tbody data-history-body></tbody></table></div>
+  <div class="history-table table-wrap"><table><thead><tr><th>时间区间</th><th>RX 入站</th><th>TX 出站</th><th>总计（RX + TX）</th></tr></thead><tbody data-history-body></tbody></table></div>
   <div class="history-pagination">
     <div class="history-page-size">
       <label>每页显示：<select class="page-size-select">
