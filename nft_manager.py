@@ -21,6 +21,7 @@ from typing import Iterable
 
 
 TABLE_NAME = "port_forward"
+MANAGED_MARKER = "# Managed by nft-forward-panel. Do not edit while the panel is running."
 RULE_RE = re.compile(
     r"^\s*tcp\s+dport\s+(?P<listen>\d+)\s+dnat\s+to\s+"
     r"(?P<ip>(?:\d{1,3}\.){3}\d{1,3}):(?P<target>\d+)\s*$"
@@ -148,7 +149,7 @@ class NftManager:
         sorted_rules = sorted(rules, key=lambda rule: rule.listen_port)
         lines = [
             "#!/usr/sbin/nft -f",
-            "# Managed by nft-forward-panel. Do not edit while the panel is running.",
+            MANAGED_MARKER,
             f"table ip {TABLE_NAME} {{",
             "    chain prerouting {",
             "        type nat hook prerouting priority -100; policy accept;",
@@ -200,8 +201,46 @@ class NftManager:
                     ]
                 )
 
+        lines.extend(
+            [
+                "",
+                "    chain wire_prerouting {",
+                # Destination NAT runs at -100. Count immediately afterwards
+                # so the original tuple identifies the forwarding rule while
+                # matching the host NIC receive-side view.
+                "        type filter hook prerouting priority -90; policy accept;",
+            ]
+        )
+        for rule in sorted_rules:
+            lines.append("")
+            for protocol in ("tcp", "udp"):
+                lines.append(
+                    f"        ct status dnat ct original protocol {protocol} "
+                    f"ct original proto-dst {rule.listen_port} counter "
+                    f'comment "nfp:wire-rx:{rule.listen_port}"'
+                )
+        lines.extend(
+            [
+                "    }",
+                "",
+                "    chain wire_postrouting {",
+                # Run after this table's srcnat chain (priority 100), as well as
+                # after the forwarding hook where per-rule policing happens.
+                "        type filter hook postrouting priority 300; policy accept;",
+            ]
+        )
+        for rule in sorted_rules:
+            lines.append("")
+            for protocol in ("tcp", "udp"):
+                lines.append(
+                    f"        ct status dnat ct original protocol {protocol} "
+                    f"ct original proto-dst {rule.listen_port} counter "
+                    f'comment "nfp:wire-tx:{rule.listen_port}"'
+                )
+        lines.append("    }")
+
         lines.extend(["", "    chain forwarding {"])
-        lines.append("        type filter hook forward priority 10; policy accept;")
+        lines.append("        type filter hook forward priority 20; policy accept;")
         for rule in sorted_rules:
             lines.append("")
             for protocol in ("tcp", "udp"):
@@ -213,7 +252,14 @@ class NftManager:
         return "\n".join(lines)
 
     def traffic_counters(self) -> dict[int, dict[str, int]]:
-        """Return cumulative nft byte counters keyed by listening port."""
+        """Return cumulative nft byte counters keyed by listening port.
+
+        ``inbound`` and ``outbound`` are logical, post-policing directions used
+        for billing.  Newer rulesets also expose optional ``rx`` and ``tx``
+        counters for the physical ingress/egress legs.  Omitting those keys for
+        older live tables lets callers distinguish an upgrade baseline from a
+        genuine zero-byte wire sample.
+        """
         if not shutil.which("nft"):
             return {}
         result = self._run(["nft", "-j", "list", "table", "ip", TABLE_NAME], check=False)
@@ -226,19 +272,33 @@ class NftManager:
         counters: dict[int, dict[str, int]] = {}
         for item in payload.get("nftables", []):
             rule = item.get("rule", {})
-            # NAT chains only see the first packet of a connection. Account
-            # bytes in filter hooks at the server's ingress and egress paths.
-            match = re.fullmatch(r"nfp:traffic-(in|out):(\d+)", rule.get("comment", ""))
-            if not match:
+            # NAT chains only see the first packet of a connection.  Logical
+            # counters live in the forwarding hook, while optional wire-leg
+            # counters use filter chains at prerouting and postrouting.
+            traffic_match = re.fullmatch(
+                r"nfp:traffic-(in|out):(\d+)",
+                rule.get("comment", ""),
+            )
+            wire_match = re.fullmatch(
+                r"nfp:wire-(rx|tx):(\d+)",
+                rule.get("comment", ""),
+            )
+            if not traffic_match and not wire_match:
                 continue
-            direction, raw_port = match.groups()
+            direction, raw_port = (
+                traffic_match.groups() if traffic_match else wire_match.groups()
+            )
             total = sum(
                 int(expression.get("counter", {}).get("bytes", 0))
                 for expression in rule.get("expr", []) if "counter" in expression
             )
             port = int(raw_port)
             counters.setdefault(port, {"inbound": 0, "outbound": 0})
-            counters[port]["inbound" if direction == "in" else "outbound"] += total
+            if traffic_match:
+                key = "inbound" if direction == "in" else "outbound"
+            else:
+                key = direction
+            counters[port][key] = counters[port].get(key, 0) + total
         return counters
 
     def connection_snapshot(self) -> dict[str, object]:
@@ -332,6 +392,67 @@ class NftManager:
         self._atomic_write(self.backup_dir / f"port-forward.conf.{stamp}", contents, 0o600)
         return contents
 
+    def _live_table_exists(self) -> bool:
+        return self._exists_and_succeeds(
+            ["nft", "list", "table", "ip", TABLE_NAME]
+        )
+
+    def _assert_table_is_managed(self) -> None:
+        """Refuse to replace a same-named table not backed by our config file."""
+        if not self.forward_config.exists():
+            raise NftOperationError(
+                f"nftables 表 ip {TABLE_NAME} 已存在，但面板配置文件不存在；"
+                "为避免覆盖其他防火墙规则，已拒绝接管该表。"
+            )
+        current = self.forward_config.read_text(encoding="utf-8", errors="replace")
+        has_managed_marker = MANAGED_MARKER in current.splitlines()
+        owns_table = re.search(
+            rf"(?m)^\s*table\s+ip\s+{re.escape(TABLE_NAME)}\s*\{{",
+            current,
+        )
+        if not has_managed_marker or not owns_table:
+            raise NftOperationError(
+                f"nftables 表 ip {TABLE_NAME} 已存在，但并非由当前面板配置文件定义；"
+                "为避免覆盖其他防火墙规则，已拒绝更新。"
+            )
+
+    @staticmethod
+    def _render_live_transaction(content: str, replace_existing: bool) -> str:
+        """Build one nft batch so replacing the managed table has no gap."""
+        lines = content.splitlines()
+        transaction: list[str] = []
+        if lines and lines[0].startswith("#!"):
+            transaction.append(lines.pop(0))
+        transaction.append(
+            "# Loaded as one nftables transaction; do not split the delete and create."
+        )
+        if replace_existing:
+            transaction.append(f"delete table ip {TABLE_NAME}")
+        transaction.extend(lines)
+        return "\n".join(transaction) + "\n"
+
+    def _run_config(self, content: str, *, check_only: bool) -> None:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".port-forward.transaction.",
+            dir=self.forward_config.parent,
+            text=True,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            args = ["nft"]
+            if check_only:
+                args.append("-c")
+            args.extend(["-f", temporary])
+            self._run(args)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
     def ensure_ready(self) -> None:
         if not hasattr(os, "geteuid") or os.geteuid() != 0:
             raise NftOperationError("面板必须以 root 身份运行，才能修改 nftables 规则。")
@@ -342,7 +463,7 @@ class NftManager:
         self._ensure_main_include()
         self._enable_ip_forward()
 
-    def validate_rules(self, rules: Iterable[ForwardRule]) -> None:
+    def _prepare_rules(self, rules: Iterable[ForwardRule]) -> tuple[str, str]:
         seen_ports: set[int] = set()
         normalised: list[ForwardRule] = []
         for rule in rules:
@@ -361,36 +482,37 @@ class NftManager:
                     outbound_limit_mbps=max(0, int(rule.outbound_limit_mbps)),
                 )
             )
-        content = self._render_config(normalised)
-        descriptor, temporary = tempfile.mkstemp(prefix=".port-forward.check.", dir=self.forward_config.parent, text=True)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(content)
-            self._run(["nft", "-c", "-f", temporary])
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+        replace_existing = self._live_table_exists()
+        if replace_existing:
+            self._assert_table_is_managed()
+        rendered = self._render_config(normalised)
+        transaction = self._render_live_transaction(rendered, replace_existing)
+        self._run_config(transaction, check_only=True)
+        return rendered, transaction
+
+    def validate_rules(self, rules: Iterable[ForwardRule]) -> None:
+        self._prepare_rules(rules)
 
     def apply_rules(self, rules: Iterable[ForwardRule]) -> None:
-        """Validate, persist and load the dedicated table, restoring on failure."""
+        """Validate and atomically replace only the dedicated nftables table."""
         rules = list(rules)
         self.ensure_ready()
-        self.validate_rules(rules)
+        rendered, transaction = self._prepare_rules(rules)
+        # nft applies the checked file as one netlink transaction, so
+        # delete+create cannot expose an empty-table window and a failed batch
+        # leaves the live rules unchanged.
         previous = self._backup_current_config()
-        self._atomic_write(self.forward_config, self._render_config(rules), 0o640)
-        self._run(["nft", "delete", "table", "ip", TABLE_NAME], check=False)
+        self._atomic_write(self.forward_config, rendered, 0o640)
         try:
-            self._run(["nft", "-f", str(self.forward_config)])
+            self._run_config(transaction, check_only=False)
         except NftOperationError as exc:
-            self._run(["nft", "delete", "table", "ip", TABLE_NAME], check=False)
             if previous is not None:
                 self._atomic_write(self.forward_config, previous, 0o640)
-                self._run(["nft", "-f", str(self.forward_config)], check=False)
             else:
                 self.forward_config.unlink(missing_ok=True)
-            raise NftOperationError(f"规则未能加载，已尝试恢复上一版本：{exc}") from exc
+            raise NftOperationError(
+                f"规则未能加载；nft 原子事务未改变线上规则，配置文件已恢复：{exc}"
+            ) from exc
 
     def listening_port_in_use(self, port: int) -> bool:
         result = self._run(["ss", "-H", "-lntu"], check=False)
@@ -411,6 +533,19 @@ class NftManager:
         check_args = ["iptables", "-C", *args]
         if not self._exists_and_succeeds(check_args):
             self._run(["iptables", "-I", *args])
+
+    def _run_firewalld_idempotent_add(self, args: list[str]) -> None:
+        """Treat firewalld's ALREADY_ENABLED response as a successful retry."""
+        result = self._run(args, check=False)
+        if result.returncode == 0:
+            return
+        output = "\n".join(
+            part for part in (result.stderr, result.stdout) if part
+        ).strip()
+        if result.returncode == 11 or "already_enabled" in output.casefold():
+            return
+        message = (result.stderr or result.stdout or "未知错误").strip()
+        raise NftOperationError(f"命令执行失败（{args[0]}）：{message}")
 
     def _run_idempotent_delete(
         self,
@@ -438,8 +573,16 @@ class NftManager:
         try:
             if self._firewalld_active():
                 for protocol in ("tcp", "udp"):
-                    self._run(["firewall-cmd", f"--add-port={rule.listen_port}/{protocol}", "--permanent"])
-                self._run(["firewall-cmd", "--reload"])
+                    port_spec = f"--add-port={rule.listen_port}/{protocol}"
+                    # Update runtime and persistent state independently. A
+                    # global reload rebuilds unrelated rules and can interrupt
+                    # SSH or the panel itself.
+                    self._run_firewalld_idempotent_add(
+                        ["firewall-cmd", port_spec]
+                    )
+                    self._run_firewalld_idempotent_add(
+                        ["firewall-cmd", "--permanent", port_spec]
+                    )
             elif self._ufw_active():
                 for protocol in ("tcp", "udp"):
                     self._run(["ufw", "allow", f"{rule.listen_port}/{protocol}"])
@@ -462,18 +605,31 @@ class NftManager:
     ) -> list[str]:
         warnings: list[str] = []
         try:
+            # A forced forwarding rule may reuse an SSH, panel, or other local
+            # service port.  Keep that port's INPUT allowance while a local
+            # socket is still listening, but continue cleaning route/FORWARD
+            # allowances for the removed forwarding destination.
+            remove_local_allowance = (
+                remove_listen_port
+                and not self.listening_port_in_use(rule.listen_port)
+            )
             if self._firewalld_active():
-                if remove_listen_port:
+                if remove_local_allowance:
                     for protocol in ("tcp", "udp"):
+                        port_spec = f"--remove-port={rule.listen_port}/{protocol}"
                         self._run_idempotent_delete(
-                            ["firewall-cmd", f"--remove-port={rule.listen_port}/{protocol}", "--permanent"],
+                            ["firewall-cmd", port_spec],
                             absent_returncodes=frozenset({12}),
                             absent_markers=(),
                         )
-                    self._run(["firewall-cmd", "--reload"])
+                        self._run_idempotent_delete(
+                            ["firewall-cmd", "--permanent", port_spec],
+                            absent_returncodes=frozenset({12}),
+                            absent_markers=(),
+                        )
             elif self._ufw_active():
                 for protocol in ("tcp", "udp"):
-                    if remove_listen_port:
+                    if remove_local_allowance:
                         self._run_idempotent_delete(
                             ["ufw", "--force", "delete", "allow", f"{rule.listen_port}/{protocol}"],
                             absent_returncodes=frozenset({1}),
@@ -487,7 +643,7 @@ class NftManager:
                         )
             elif self._iptables_available():
                 for protocol in ("tcp", "udp"):
-                    if remove_listen_port:
+                    if remove_local_allowance:
                         self._run_idempotent_delete(
                             ["iptables", "-D", "INPUT", "-p", protocol, "--dport", str(rule.listen_port), "-j", "ACCEPT"],
                             absent_returncodes=frozenset({1}),
