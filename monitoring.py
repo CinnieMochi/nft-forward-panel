@@ -44,8 +44,9 @@ def reset_counter_baselines(
     connection.execute("DELETE FROM rule_counter_state")
     connection.executemany(
         """INSERT INTO rule_counter_state
-           (rule_id, inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps)
-           VALUES (?, 0, 0, ?, 0, 0)""",
+           (rule_id, inbound_bytes, outbound_bytes, rx_bytes, tx_bytes,
+            sampled_at, inbound_bps, outbound_bps, rx_bps, tx_bps)
+           VALUES (?, 0, 0, 0, 0, ?, 0, 0, 0, 0)""",
         [(rule_id, sampled_at) for rule_id in rule_ids],
     )
 
@@ -73,19 +74,40 @@ class TrafficMonitor:
         for rule in rules:
             rule_id, port = int(rule["id"]), int(rule["listen_port"])
             current = raw.get(port, {"inbound": 0, "outbound": 0})
+            current_in = int(current.get("inbound", 0))
+            current_out = int(current.get("outbound", 0))
+            logical_total = current_in + current_out
+            # Old managed nft tables do not have physical ingress/egress
+            # counters.  Until the next table reload, approximate each NIC leg
+            # with the complete logical flow.  This intentionally makes usage
+            # RX + TX, matching the host-interface accounting requested by the
+            # panel rather than the former one-copy request/reply accounting.
+            current_rx = int(current.get("rx", logical_total))
+            current_tx = int(current.get("tx", logical_total))
             previous = connection.execute(
-                "SELECT inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps FROM rule_counter_state WHERE rule_id = ?",
+                """SELECT inbound_bytes, outbound_bytes, rx_bytes, tx_bytes,
+                          sampled_at, inbound_bps, outbound_bps, rx_bps, tx_bps
+                   FROM rule_counter_state WHERE rule_id = ?""",
                 (rule_id,),
             ).fetchone()
             if port not in raw:
-                if previous and (float(previous["inbound_bps"]) or float(previous["outbound_bps"])):
+                if previous and any(float(previous[name]) for name in (
+                    "inbound_bps", "outbound_bps", "rx_bps", "tx_bps"
+                )):
                     connection.execute(
-                        "UPDATE rule_counter_state SET inbound_bps=0, outbound_bps=0 WHERE rule_id=?",
+                        """UPDATE rule_counter_state
+                           SET inbound_bps=0, outbound_bps=0, rx_bps=0, tx_bps=0
+                           WHERE rule_id=?""",
                         (rule_id,),
                     )
-                result[rule_id] = {"inbound_bps": 0.0, "outbound_bps": 0.0}
+                result[rule_id] = {
+                    "inbound_bps": 0.0,
+                    "outbound_bps": 0.0,
+                    "rx_bps": 0.0,
+                    "tx_bps": 0.0,
+                }
                 continue
-            delta_in = delta_out = 0
+            delta_in = delta_out = delta_rx = delta_tx = 0
             elapsed = 5.0
             preserve_previous_rate = False
             if previous:
@@ -104,38 +126,75 @@ class TrafficMonitor:
                     # discard them, while retaining the last stable rate to
                     # avoid a sub-second speed spike in the UI.
                     preserve_previous_rate = True
-                delta_in = current["inbound"] - int(previous["inbound_bytes"])
-                delta_out = current["outbound"] - int(previous["outbound_bytes"])
-                if delta_in < 0:
-                    delta_in = 0
-                if delta_out < 0:
-                    delta_out = 0
+                previous_in = int(previous["inbound_bytes"])
+                previous_out = int(previous["outbound_bytes"])
+                previous_rx = int(previous["rx_bytes"])
+                previous_tx = int(previous["tx_bytes"])
+                previous_logical_total = previous_in + previous_out
+                # A partially completed in-place upgrade may already have the
+                # new state columns at their DEFAULT 0 while the live nft table
+                # is still the old logical-only version.  Derive the matching
+                # old-table baseline so the first sampler cannot turn all
+                # lifetime traffic into a speed/usage spike.
+                if "rx" not in current and previous_rx == 0 and previous_logical_total:
+                    previous_rx = previous_logical_total
+                if "tx" not in current and previous_tx == 0 and previous_logical_total:
+                    previous_tx = previous_logical_total
+                delta_in = max(0, current_in - previous_in)
+                delta_out = max(0, current_out - previous_out)
+                delta_rx = max(0, current_rx - previous_rx)
+                delta_tx = max(0, current_tx - previous_tx)
             if preserve_previous_rate and previous:
                 inbound_bps = float(previous["inbound_bps"])
                 outbound_bps = float(previous["outbound_bps"])
+                rx_bps = float(previous["rx_bps"])
+                tx_bps = float(previous["tx_bps"])
             else:
                 inbound_bps = round(delta_in / elapsed, 1)
                 outbound_bps = round(delta_out / elapsed, 1)
+                rx_bps = round(delta_rx / elapsed, 1)
+                tx_bps = round(delta_tx / elapsed, 1)
             connection.execute(
-                """INSERT INTO rule_counter_state(rule_id, inbound_bytes, outbound_bytes, sampled_at, inbound_bps, outbound_bps)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO rule_counter_state
+                   (rule_id, inbound_bytes, outbound_bytes, rx_bytes, tx_bytes,
+                    sampled_at, inbound_bps, outbound_bps, rx_bps, tx_bps)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(rule_id) DO UPDATE SET inbound_bytes=excluded.inbound_bytes,
-                   outbound_bytes=excluded.outbound_bytes, sampled_at=excluded.sampled_at,
-                   inbound_bps=excluded.inbound_bps, outbound_bps=excluded.outbound_bps""",
-                (rule_id, current["inbound"], current["outbound"], now_text, inbound_bps, outbound_bps),
+                   outbound_bytes=excluded.outbound_bytes, rx_bytes=excluded.rx_bytes,
+                   tx_bytes=excluded.tx_bytes, sampled_at=excluded.sampled_at,
+                   inbound_bps=excluded.inbound_bps, outbound_bps=excluded.outbound_bps,
+                   rx_bps=excluded.rx_bps, tx_bps=excluded.tx_bps""",
+                (
+                    rule_id, current_in, current_out, current_rx, current_tx,
+                    now_text, inbound_bps, outbound_bps, rx_bps, tx_bps,
+                ),
             )
-            if delta_in or delta_out:
+            if delta_in or delta_out or delta_rx or delta_tx:
                 connection.execute(
-                    """INSERT INTO traffic_buckets(rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
-                       VALUES (?, ?, ?, ?, ?)
+                    """INSERT INTO traffic_buckets
+                       (rule_id, owner_id, bucket_at, inbound_bytes,
+                        outbound_bytes, rx_bytes, tx_bytes)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(rule_id, owner_id, bucket_at) DO UPDATE SET
                        inbound_bytes=inbound_bytes+excluded.inbound_bytes,
-                       outbound_bytes=outbound_bytes+excluded.outbound_bytes""",
-                    (rule_id, int(rule["owner_id"]), bucket, delta_in, delta_out),
+                       outbound_bytes=outbound_bytes+excluded.outbound_bytes,
+                       rx_bytes=rx_bytes+excluded.rx_bytes,
+                       tx_bytes=tx_bytes+excluded.tx_bytes""",
+                    (
+                        rule_id,
+                        int(rule["owner_id"]),
+                        bucket,
+                        delta_in,
+                        delta_out,
+                        delta_rx,
+                        delta_tx,
+                    ),
                 )
             result[rule_id] = {
                 "inbound_bps": inbound_bps,
                 "outbound_bps": outbound_bps,
+                "rx_bps": rx_bps,
+                "tx_bps": tx_bps,
             }
         cutoff = (now_dt - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S UTC")
         connection.execute("DELETE FROM traffic_buckets WHERE bucket_at < ?", (cutoff,))
