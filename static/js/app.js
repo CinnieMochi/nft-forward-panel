@@ -31,6 +31,22 @@
     if (mbps >= 10) return mbps.toFixed(1).replace(/\.0$/, "");
     return mbps.toFixed(2).replace(/\.00$/, "").replace(/0$/, "");
   };
+  const firstFiniteNumber = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === "") continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return Math.max(0, number);
+    }
+    return 0;
+  };
+  const readLiveWireRates = (source = {}) => ({
+    rx: firstFiniteNumber(source.rx_bps, source.inbound_bps),
+    tx: firstFiniteNumber(source.tx_bps, source.outbound_bps),
+  });
+  const readWireTraffic = (source = {}) => ({
+    rx: firstFiniteNumber(source.rx, source.rx_bytes, source.inbound),
+    tx: firstFiniteNumber(source.tx, source.tx_bytes, source.outbound),
+  });
   const updateBandwidthGauge = (kind, bps) => {
     const gauge = document.querySelector(`[data-bandwidth-gauge="${kind}"]`);
     if (!gauge) return;
@@ -46,7 +62,7 @@
       const progress = Math.min(1, value / 500);
       paintGauge(gauge, progress, gaugeTone(value, 100, 300));
       if (label) label.textContent = formatMbps(value);
-      gauge.setAttribute("aria-label", `${kind === "inbound" ? "实时入站带宽" : "实时出站带宽"} ${formatMbps(value)} Mbps`);
+      gauge.setAttribute("aria-label", `${kind === "rx" ? "实时 RX 入站带宽" : "实时 TX 出站带宽"} ${formatMbps(value)} Mbps`);
       if (ratio < 1) requestAnimationFrame(paint);
       else gaugeState.set(gauge, target);
     };
@@ -187,17 +203,22 @@
       const response = await fetch(overview.dataset.overviewUrl, {headers: {"Accept": "application/json"}});
       if (!response.ok) throw new Error("overview request failed");
       const data = await response.json();
-      document.querySelectorAll('[data-metric="inbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.inbound_bps, "/s"); });
-      document.querySelectorAll('[data-metric="outbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.outbound_bps, "/s"); });
-      updateBandwidthGauge("inbound", data.totals.inbound_bps);
-      updateBandwidthGauge("outbound", data.totals.outbound_bps);
+      const totalRates = readLiveWireRates(data.totals);
+      document.querySelectorAll('[data-metric="rx"]').forEach((node) => { node.textContent = formatBytes(totalRates.rx, "/s"); });
+      document.querySelectorAll('[data-metric="tx"]').forEach((node) => { node.textContent = formatBytes(totalRates.tx, "/s"); });
+      updateBandwidthGauge("rx", totalRates.rx);
+      updateBandwidthGauge("tx", totalRates.tx);
       document.querySelectorAll('[data-metric="monthly"]').forEach((node) => { node.textContent = formatBytes(data.totals.monthly_bytes); });
       document.querySelectorAll('[data-metric="connections"]').forEach((node) => { node.textContent = data.totals.connections; });
       document.querySelectorAll('[data-metric="tcp-connections"]').forEach((node) => { node.textContent = data.totals.tcp_connections; });
       document.querySelectorAll('[data-metric="udp-connections"]').forEach((node) => { node.textContent = data.totals.udp_connections; });
       document.querySelectorAll('[data-metric="rule-count"]').forEach((node) => { node.textContent = data.totals.rule_count; });
-      document.querySelectorAll('[data-metric="previous-hour-inbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.previous_hour_inbound_bytes); });
-      document.querySelectorAll('[data-metric="previous-hour-outbound"]').forEach((node) => { node.textContent = formatBytes(data.totals.previous_hour_outbound_bytes); });
+      document.querySelectorAll('[data-metric="previous-hour-rx"]').forEach((node) => {
+        node.textContent = formatBytes(firstFiniteNumber(data.totals.previous_hour_rx_bytes, data.totals.previous_hour_inbound_bytes));
+      });
+      document.querySelectorAll('[data-metric="previous-hour-tx"]').forEach((node) => {
+        node.textContent = formatBytes(firstFiniteNumber(data.totals.previous_hour_tx_bytes, data.totals.previous_hour_outbound_bytes));
+      });
       connectionPoints.push(Math.max(0, Number(data.totals.connections) || 0));
       connectionPoints = connectionPoints.slice(-60);
       drawConnectionsSparkline();
@@ -213,8 +234,9 @@
           status.className = `connectivity ${rule.reachable ? "online" : "offline"}`;
           status.querySelector("b").textContent = rule.reachable ? `${rule.latency_ms} ms` : "失联";
         }
-        row.querySelector(".in-rate").textContent = `↓ ${formatBytes(rule.inbound_bps, "/s")}`;
-        row.querySelector(".out-rate").textContent = `↑ ${formatBytes(rule.outbound_bps, "/s")}`;
+        const ruleRates = readLiveWireRates(rule);
+        row.querySelector(".rx-rate").textContent = `RX ↓ ${formatBytes(ruleRates.rx, "/s")}`;
+        row.querySelector(".tx-rate").textContent = `TX ↑ ${formatBytes(ruleRates.tx, "/s")}`;
         row.querySelector(".connection-count").textContent = rule.connections;
       });
       const list = document.querySelector("[data-connection-list]");
@@ -244,9 +266,9 @@
           list.append(item);
         });
       }
-      livePoints.push({time: Date.now(), inbound: data.totals.inbound_bps, outbound: data.totals.outbound_bps});
+      livePoints.push({time: Date.now(), rx: totalRates.rx, tx: totalRates.tx});
       livePoints = livePoints.slice(-120);
-      if (document.querySelector('[data-chart-kind="bandwidth"]') && document.querySelector('[data-range] .active')?.dataset.rangeValue === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+      if (document.querySelector('[data-chart-kind="bandwidth"]') && document.querySelector('[data-range] .active')?.dataset.rangeValue === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), rx: point.rx, tx: point.tx})), true);
     } catch (error) {
       document.querySelectorAll(".connectivity.pending b").forEach((node) => { node.textContent = "刷新失败"; });
     } finally {
@@ -272,7 +294,7 @@
     if (!ctx) return;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    const max = Math.max(1, ...points.flatMap((point) => [Number(point.inbound), Number(point.outbound)]));
+    const max = Math.max(1, ...points.flatMap((point) => [Number(point.rx), Number(point.tx)]));
     ctx.font = "11px system-ui";
     ctx.textBaseline = "middle";
     ctx.lineWidth = 1;
@@ -318,7 +340,7 @@
       const barWidth = Math.min(16, Math.max(4, groupWidth * 0.3));
       const centers = points.map((_, index) => pad.left + groupWidth * (index + 0.5));
       points.forEach((point, index) => {
-        [["inbound", "#1677ff", -barWidth], ["outbound", "#16a765", 0]].forEach(([key, color, offset]) => {
+        [["rx", "#1677ff", -barWidth], ["tx", "#16a765", 0]].forEach(([key, color, offset]) => {
           const barHeight = plotHeight * Number(point[key]) / max;
           ctx.fillStyle = color;
           ctx.fillRect(centers[index] + offset, height - pad.bottom - barHeight, barWidth, barHeight);
@@ -335,7 +357,7 @@
         });
         ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
       };
-      plot("inbound", "#1677ff"); plot("outbound", "#16a765");
+      plot("rx", "#1677ff"); plot("tx", "#16a765");
       drawXLabels(centers);
     }
   }
@@ -377,13 +399,14 @@
       historyRows.slice(start, start + historyPageSize).forEach((point) => {
         const row = document.createElement("tr");
         const rate = historyPanel.dataset.chartKind === "bandwidth";
+        const traffic = readWireTraffic(point);
         const values = rate
-          ? [point.period, formatBytes(Number(point.inbound) / historyInterval, "/s"), formatBytes(Number(point.outbound) / historyInterval, "/s")]
-          : [point.period, formatBytes(point.inbound), formatBytes(point.outbound)];
+          ? [point.period, formatBytes(traffic.rx / historyInterval, "/s"), formatBytes(traffic.tx / historyInterval, "/s")]
+          : [point.period, formatBytes(traffic.rx), formatBytes(traffic.tx)];
         values.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); });
         const totalCell = document.createElement("td");
         const total = document.createElement("strong");
-        const bytes = Number(point.inbound) + Number(point.outbound);
+        const bytes = traffic.rx + traffic.tx;
         total.textContent = rate ? formatBytes(bytes / historyInterval, "/s") : formatBytes(bytes);
         totalCell.append(total);
         row.append(totalCell);
@@ -408,13 +431,16 @@
     const response = await fetch(`${historyPanel.dataset.historyUrl}?kind=${kind}&days=${days}`);
     if (!response.ok) return;
     const data = await response.json();
-    const rawPoints = data.points.map((point) => ({...point, period: periodLabel(point.period, days)}));
+    const rawPoints = data.points.map((point) => {
+      const traffic = readWireTraffic(point);
+      return {...point, period: periodLabel(point.period, days), rx: traffic.rx, tx: traffic.tx};
+    });
     historyInterval = Number(data.interval_seconds) || 1;
     historyRows = rawPoints.slice().reverse();
     historyPage = 1;
     renderHistoryPage();
     historyChartPoints = kind === "bandwidth"
-      ? rawPoints.map((point) => ({...point, inbound: Number(point.inbound) / historyInterval, outbound: Number(point.outbound) / historyInterval}))
+      ? rawPoints.map((point) => ({...point, rx: point.rx / historyInterval, tx: point.tx / historyInterval}))
       : rawPoints;
     drawChart(historyChartPoints, kind === "bandwidth");
   }
@@ -438,7 +464,7 @@
     button.classList.add("active");
     const value = button.dataset.rangeValue;
     document.querySelector("[data-chart-caption]")?.replaceChildren(value === "live" ? "当前实时" : `最近 ${button.textContent}`);
-    if (value === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+    if (value === "live") drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), rx: point.rx, tx: point.tx})), true);
     else loadHistory(value);
   }));
   let resizeTimer;
@@ -448,7 +474,7 @@
       drawConnectionsSparkline();
       const active = document.querySelector("[data-range] .active")?.dataset.rangeValue;
       if (active === "live" && livePoints.length) {
-        drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), inbound: point.inbound, outbound: point.outbound})), true);
+        drawChart(livePoints.map((point) => ({period: new Date(point.time).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}), rx: point.rx, tx: point.tx})), true);
       } else if (active && historyChartPoints.length) {
         drawChart(historyChartPoints, document.querySelector("[data-chart-kind]")?.dataset.chartKind === "bandwidth");
       }
