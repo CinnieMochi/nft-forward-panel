@@ -331,9 +331,13 @@ def init_schema(app: Flask) -> None:
                 rule_id INTEGER PRIMARY KEY REFERENCES forward_rules(id) ON DELETE CASCADE,
                 inbound_bytes INTEGER NOT NULL DEFAULT 0,
                 outbound_bytes INTEGER NOT NULL DEFAULT 0,
+                rx_bytes INTEGER NOT NULL DEFAULT 0,
+                tx_bytes INTEGER NOT NULL DEFAULT 0,
                 sampled_at TEXT NOT NULL,
                 inbound_bps REAL NOT NULL DEFAULT 0,
-                outbound_bps REAL NOT NULL DEFAULT 0
+                outbound_bps REAL NOT NULL DEFAULT 0,
+                rx_bps REAL NOT NULL DEFAULT 0,
+                tx_bps REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS traffic_buckets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -342,6 +346,8 @@ def init_schema(app: Flask) -> None:
                 bucket_at TEXT NOT NULL,
                 inbound_bytes INTEGER NOT NULL DEFAULT 0,
                 outbound_bytes INTEGER NOT NULL DEFAULT 0,
+                rx_bytes INTEGER NOT NULL DEFAULT 0,
+                tx_bytes INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(rule_id, owner_id, bucket_at)
             );
             CREATE TABLE IF NOT EXISTS login_attempts (
@@ -361,6 +367,10 @@ def init_schema(app: Flask) -> None:
                 created_at TEXT NOT NULL,
                 last_attempt_at TEXT NOT NULL DEFAULT '',
                 UNIQUE(operation, rule_id, listen_port, destination_ip, destination_port, remove_listen_port)
+            );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_login_attempts_addr_time ON login_attempts(remote_addr, attempted_at);
             CREATE INDEX IF NOT EXISTS idx_rules_owner ON forward_rules(owner_id);
@@ -407,9 +417,55 @@ def init_schema(app: Flask) -> None:
         for name, sql in {
             "inbound_bps": "ALTER TABLE rule_counter_state ADD COLUMN inbound_bps REAL NOT NULL DEFAULT 0",
             "outbound_bps": "ALTER TABLE rule_counter_state ADD COLUMN outbound_bps REAL NOT NULL DEFAULT 0",
+            "rx_bytes": "ALTER TABLE rule_counter_state ADD COLUMN rx_bytes INTEGER NOT NULL DEFAULT 0",
+            "tx_bytes": "ALTER TABLE rule_counter_state ADD COLUMN tx_bytes INTEGER NOT NULL DEFAULT 0",
+            "rx_bps": "ALTER TABLE rule_counter_state ADD COLUMN rx_bps REAL NOT NULL DEFAULT 0",
+            "tx_bps": "ALTER TABLE rule_counter_state ADD COLUMN tx_bps REAL NOT NULL DEFAULT 0",
         }.items():
             if name not in counter_columns:
                 connection.execute(sql)
+        # Existing nft configurations expose only logical request/reply
+        # counters. Seed the new physical-direction baselines from their sum so
+        # the first sample after an in-place upgrade cannot report a spike.
+        if "rx_bytes" not in counter_columns:
+            connection.execute(
+                "UPDATE rule_counter_state SET rx_bytes=inbound_bytes+outbound_bytes"
+            )
+        if "tx_bytes" not in counter_columns:
+            connection.execute(
+                "UPDATE rule_counter_state SET tx_bytes=inbound_bytes+outbound_bytes"
+            )
+        if "rx_bps" not in counter_columns:
+            connection.execute(
+                "UPDATE rule_counter_state SET rx_bps=inbound_bps+outbound_bps"
+            )
+        if "tx_bps" not in counter_columns:
+            connection.execute(
+                "UPDATE rule_counter_state SET tx_bps=inbound_bps+outbound_bps"
+            )
+        traffic_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(traffic_buckets)")
+        }
+        physical_history_migration = connection.execute(
+            """SELECT 1 FROM schema_migrations
+               WHERE name='physical_rx_tx_history_v1'"""
+        ).fetchone() is None
+        if "rx_bytes" not in traffic_columns:
+            connection.execute(
+                "ALTER TABLE traffic_buckets ADD COLUMN rx_bytes INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.execute(
+                """UPDATE traffic_buckets
+                   SET rx_bytes=inbound_bytes+outbound_bytes"""
+            )
+        if "tx_bytes" not in traffic_columns:
+            connection.execute(
+                "ALTER TABLE traffic_buckets ADD COLUMN tx_bytes INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.execute(
+                """UPDATE traffic_buckets
+                   SET tx_bytes=inbound_bytes+outbound_bytes"""
+            )
         # Traffic history must survive rule deletion, and ownership changes
         # within one five-minute bucket must retain separate owner totals.
         traffic_foreign_keys = connection.execute("PRAGMA foreign_key_list(traffic_buckets)").fetchall()
@@ -445,11 +501,30 @@ def init_schema(app: Flask) -> None:
                     # Recover data left by the older non-transactional
                     # migration.  Matching IDs/unique rows are already present
                     # in the authoritative table and are intentionally ignored.
+                    legacy_staging_columns = {
+                        row[1]
+                        for row in connection.execute(
+                            "PRAGMA table_info(traffic_buckets_without_rule_fk)"
+                        )
+                    }
+                    legacy_rx = (
+                        "rx_bytes"
+                        if "rx_bytes" in legacy_staging_columns
+                        else "inbound_bytes+outbound_bytes"
+                    )
+                    legacy_tx = (
+                        "tx_bytes"
+                        if "tx_bytes" in legacy_staging_columns
+                        else "inbound_bytes+outbound_bytes"
+                    )
                     connection.execute(
-                        """INSERT OR IGNORE INTO traffic_buckets
-                           (id, rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
-                           SELECT id, rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes
-                           FROM traffic_buckets_without_rule_fk"""
+                        f"""INSERT OR IGNORE INTO traffic_buckets
+                            (id, rule_id, owner_id, bucket_at, inbound_bytes,
+                             outbound_bytes, rx_bytes, tx_bytes)
+                            SELECT id, rule_id, owner_id, bucket_at,
+                                   inbound_bytes, outbound_bytes,
+                                   {legacy_rx}, {legacy_tx}
+                            FROM traffic_buckets_without_rule_fk"""
                     )
                     connection.execute("DROP TABLE traffic_buckets_without_rule_fk")
                 connection.execute("DROP TABLE IF EXISTS traffic_buckets_migration_v2")
@@ -461,14 +536,18 @@ def init_schema(app: Flask) -> None:
                            bucket_at TEXT NOT NULL,
                            inbound_bytes INTEGER NOT NULL DEFAULT 0,
                            outbound_bytes INTEGER NOT NULL DEFAULT 0,
+                           rx_bytes INTEGER NOT NULL DEFAULT 0,
+                           tx_bytes INTEGER NOT NULL DEFAULT 0,
                            UNIQUE(rule_id, owner_id, bucket_at)
                        )"""
                 )
                 connection.execute(
                     """INSERT INTO traffic_buckets_migration_v2
-                           (rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
+                           (rule_id, owner_id, bucket_at, inbound_bytes,
+                            outbound_bytes, rx_bytes, tx_bytes)
                        SELECT rule_id, owner_id, bucket_at,
-                              SUM(inbound_bytes), SUM(outbound_bytes)
+                               SUM(inbound_bytes), SUM(outbound_bytes),
+                               SUM(rx_bytes), SUM(tx_bytes)
                        FROM traffic_buckets
                        GROUP BY rule_id, owner_id, bucket_at"""
                 )
@@ -484,6 +563,63 @@ def init_schema(app: Flask) -> None:
             except Exception:
                 connection.rollback()
                 raise
+        if physical_history_migration:
+            # A forwarded byte normally traverses the host once on RX and once
+            # on TX.  Old history only recorded one logical copy split into
+            # request/reply directions, so the closest recoverable physical
+            # history is logical_total on each wire leg.
+            #
+            # Administrators can calibrate "used traffic" to an absolute value
+            # through an offset.  Compensate that active-cycle offset by the
+            # migration's measured-usage increase so their explicitly entered
+            # value does not jump when the service first starts this version.
+            migrated_at = datetime.now(timezone.utc)
+            users_for_offset = connection.execute(
+                """SELECT id, monthly_reset_day, monthly_reset_minute,
+                          usage_offset_bytes, usage_offset_cycle_start
+                   FROM users"""
+            ).fetchall()
+            for (
+                owner_id,
+                reset_day,
+                reset_minute,
+                usage_offset,
+                offset_cycle_start,
+            ) in users_for_offset:
+                owner_policy = {
+                    "monthly_reset_day": reset_day,
+                    "monthly_reset_minute": reset_minute,
+                }
+                cycle_start = monthly_cycle_start(
+                    owner_policy, migrated_at
+                ).strftime(UTC_TIME_FORMAT)
+                if (offset_cycle_start or "") != cycle_start:
+                    continue
+                totals = connection.execute(
+                    """SELECT
+                           COALESCE(SUM(inbound_bytes)+SUM(outbound_bytes), 0),
+                           COALESCE(SUM(rx_bytes)+SUM(tx_bytes), 0)
+                       FROM traffic_buckets
+                       WHERE owner_id=? AND bucket_at>=?""",
+                    (owner_id, cycle_start),
+                ).fetchone()
+                migration_increase = int(totals[1]) - int(totals[0])
+                if migration_increase:
+                    connection.execute(
+                        """UPDATE users
+                           SET usage_offset_bytes=?
+                           WHERE id=? AND usage_offset_cycle_start=?""",
+                        (
+                            int(usage_offset) - migration_increase,
+                            owner_id,
+                            cycle_start,
+                        ),
+                    )
+            connection.execute(
+                """INSERT INTO schema_migrations(name, applied_at)
+                   VALUES ('physical_rx_tx_history_v1', ?)""",
+                (now(),),
+            )
         count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             username = os.environ.get("PANEL_ADMIN_USERNAME", "")
@@ -610,7 +746,7 @@ def measured_monthly_usage(
 ) -> int:
     start = monthly_cycle_start(user, at).strftime(UTC_TIME_FORMAT)
     row = connection.execute(
-        "SELECT COALESCE(SUM(inbound_bytes) + SUM(outbound_bytes), 0) FROM traffic_buckets WHERE owner_id=? AND bucket_at>=?",
+        "SELECT COALESCE(SUM(rx_bytes) + SUM(tx_bytes), 0) FROM traffic_buckets WHERE owner_id=? AND bucket_at>=?",
         (user["id"], start),
     ).fetchone()
     return int(row[0])
@@ -1600,9 +1736,12 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             int(row["rule_id"]): {
                 "inbound_bps": float(row["inbound_bps"]),
                 "outbound_bps": float(row["outbound_bps"]),
+                "rx_bps": float(row["rx_bps"]),
+                "tx_bps": float(row["tx_bps"]),
             }
             for row in connection.execute(
-                "SELECT rule_id, inbound_bps, outbound_bps FROM rule_counter_state"
+                "SELECT rule_id, inbound_bps, outbound_bps, rx_bps, tx_bps "
+                "FROM rule_counter_state"
             ).fetchall()
         }
         connection_snapshot = cached_connection_snapshot()
@@ -1624,6 +1763,8 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "reachable": reachability["reachable"], "latency_ms": reachability["latency_ms"],
                 "inbound_bps": live.get(rule["id"], {}).get("inbound_bps", 0),
                 "outbound_bps": live.get(rule["id"], {}).get("outbound_bps", 0),
+                "rx_bps": live.get(rule["id"], {}).get("rx_bps", 0),
+                "tx_bps": live.get(rule["id"], {}).get("tx_bps", 0),
                 "connections": 0 if rule["paused_reason"] else connections.get(int(rule["listen_port"]), 0),
                 "paused_reason": rule["paused_reason"], "paused_label": pause_label(rule["paused_reason"]),
                 "inbound_limit_mbps": rule["inbound_limit_mbps"], "outbound_limit_mbps": rule["outbound_limit_mbps"],
@@ -1638,19 +1779,24 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             previous_owner_filter = " AND owner_id=?"
             previous_params.append(user["id"])
         previous_usage = connection.execute(
-            "SELECT COALESCE(SUM(inbound_bytes),0), COALESCE(SUM(outbound_bytes),0) "
+            "SELECT COALESCE(SUM(inbound_bytes),0), COALESCE(SUM(outbound_bytes),0), "
+            "COALESCE(SUM(rx_bytes),0), COALESCE(SUM(tx_bytes),0) "
             "FROM traffic_buckets WHERE bucket_at>=? AND bucket_at<?" + previous_owner_filter,
             previous_params,
         ).fetchone()
         return jsonify({"rules": rows, "totals": {
             "inbound_bps": sum(float(row["inbound_bps"]) for row in rows),
             "outbound_bps": sum(float(row["outbound_bps"]) for row in rows),
+            "rx_bps": sum(float(row["rx_bps"]) for row in rows),
+            "tx_bps": sum(float(row["tx_bps"]) for row in rows),
             "connections": sum(int(row["connections"]) for row in rows),
             "tcp_connections": sum(int(connection_snapshot["tcp_ports"].get(int(rule["listen_port"]), 0)) for rule in rules),
             "udp_connections": sum(int(connection_snapshot["udp_ports"].get(int(rule["listen_port"]), 0)) for rule in rules),
             "rule_count": len(rows),
             "previous_hour_inbound_bytes": int(previous_usage[0]),
             "previous_hour_outbound_bytes": int(previous_usage[1]),
+            "previous_hour_rx_bytes": int(previous_usage[2]),
+            "previous_hour_tx_bytes": int(previous_usage[3]),
             "monthly_bytes": monthly_bytes,
             "monthly_quota_bytes": monthly_quota,
             "expires_at": format_expiry(user["expires_at"]),
@@ -1692,7 +1838,8 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         )
         rows = get_db().execute(
             f"""SELECT {period_sql} AS period, SUM(t.inbound_bytes) AS inbound,
-                       SUM(t.outbound_bytes) AS outbound
+                       SUM(t.outbound_bytes) AS outbound,
+                       SUM(t.rx_bytes) AS rx, SUM(t.tx_bytes) AS tx
                 FROM traffic_buckets t WHERE t.bucket_at>=?""" + owner_filter + " GROUP BY period ORDER BY period",
             params,
         ).fetchall()
