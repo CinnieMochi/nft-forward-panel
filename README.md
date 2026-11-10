@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.7/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.7/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.7/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.6
+sudo bash /tmp/nfp-install.sh --version v1.2.7
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -278,8 +278,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.6 -m "v1.2.6"
-git push origin v1.2.6
+git tag -a v1.2.7 -m "v1.2.7"
+git push origin v1.2.7
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -322,13 +322,20 @@ sudo nfpctl status
 
 ## 版本
 
+### v1.2.7
+
+- 新增：概览页「本月总流量」卡片在**有流量包时**显示蓝色「流量包」胶囊，点击直接查看本周期所有包的大小、已用量、到期时间与状态；没有流量包时不显示。
+- 校验：追加流量包后该卡片的**额度分母同步增加**、百分比自动下降、环形弧长按新比例重绘。实测 1000 GiB 额度 + 100 GiB 用量（10%、弧长 7.50）追加 1000 GiB 后变成 1.95 TB 额度、5%、弧长 3.75。
+- 修复：≤1400px 窄屏下卡片数值被环形图压住的既有响应式问题（环形缩到 58px、右内边距收紧）。
+- 文档：更正 v1.2.6 里关于「本月流量」改名的表述——只改了用户表列头。
+
 ### v1.2.6
 
 - 新增：**流量包**。管理员可在「用户与策略」的「本期流量」列给账户追加临时额度，一个账户可加多个，每包单独显示用量与到期时间，用完标红「已用尽」。
 - 规则：流量包**只在本计费周期有效**，到该账户的重置时刻自动失效，下个周期仍然只有策略里配置的额度；额度按「基础额度先用完，再按添加顺序消耗流量包」计算，因此每个包的用量是确定的。
 - 新增：流量包可随时删除（额度立即收回），增删都会写审计（`package_add` / `package_delete`）。
 - 限制：月流量为「不限量」的账户不允许添加流量包（没有意义），接口会直接拒绝。
-- 改名：「本月流量」统一改为**「本期流量」**（用户表、概览卡片、流量统计页），与"计费周期"语义一致。
+- 改名：用户表里的「本月流量」列改为**「本期流量」**（概览卡片仍叫「本月总流量」）。
 
 ### v1.2.5
 

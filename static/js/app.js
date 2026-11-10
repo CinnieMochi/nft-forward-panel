@@ -177,7 +177,52 @@
       area.setAttribute("d", `${path} L${width} ${bottom} L0 ${bottom} Z`);
     });
   };
+  const pad2 = (value) => String(value).padStart(2, "0");
+  const formatUtcStamp = (value) => {
+    const parsed = new Date(String(value || "").replace(" ", "T").replace(" UTC", "Z"));
+    if (Number.isNaN(parsed.getTime())) return String(value || "");
+    return `${parsed.getFullYear()}年${pad2(parsed.getMonth() + 1)}月${pad2(parsed.getDate())}日 ${pad2(parsed.getHours())}:${pad2(parsed.getMinutes())}`;
+  };
+
+  const renderMyPackages = (packages) => {
+    const list = document.querySelector('[data-metric="my-package-rows"]');
+    const empty = document.querySelector('[data-metric="my-package-empty"]');
+    if (!list) return;
+    const items = Array.isArray(packages) ? packages : [];
+    list.replaceChildren();
+    items.forEach((item) => {
+      const row = document.createElement("li");
+      const main = document.createElement("div");
+      main.className = "package-row-main";
+      const size = document.createElement("strong");
+      size.textContent = `+${item.label}`;
+      const meta = document.createElement("small");
+      meta.textContent = `已用 ${item.used_label} · 到期 ${formatUtcStamp(item.expires_at)}${item.note ? ` · ${item.note}` : ""}`;
+      main.append(size, meta);
+      const state = document.createElement("span");
+      state.className = `package-state${item.exhausted ? " exhausted" : ""}`;
+      state.textContent = item.exhausted ? "已用尽" : "可用";
+      row.append(main, state);
+      list.append(row);
+    });
+    if (empty) empty.hidden = items.length > 0;
+  };
+
+  const renderMonthlyPackageChip = (totals) => {
+    const bonus = Math.max(0, Number(totals.monthly_bonus_bytes) || 0);
+    const chip = document.querySelector('[data-metric="monthly-package-chip"]');
+    if (chip) {
+      chip.hidden = bonus <= 0;
+      if (bonus > 0) {
+        chip.textContent = "流量包";
+        chip.title = `本计费周期已追加 ${formatBytes(bonus)}，点击查看详情`;
+      }
+    }
+    renderMyPackages(totals.monthly_packages);
+  };
+
   const updateMonthlyQuota = (totals) => {
+    renderMonthlyPackageChip(totals);
     const quota = Number(totals.monthly_quota_bytes) || 0;
     const usage = Math.max(0, Number(totals.monthly_bytes) || 0);
     const detail = document.querySelector('[data-metric="monthly-detail"]');

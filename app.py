@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.2.6"
+PANEL_VERSION = "1.2.7"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0
@@ -2215,7 +2215,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "inbound_limit_mbps": rule["inbound_limit_mbps"], "outbound_limit_mbps": rule["outbound_limit_mbps"],
             })
         monthly_bytes = monthly_usage(connection, user)
-        monthly_bonus = package_bytes(connection, user)
+        monthly_bonus, monthly_packages = package_breakdown(connection, user, monthly_bytes)
         monthly_quota = int(user["monthly_quota_bytes"])
         if monthly_quota:
             monthly_quota += monthly_bonus
@@ -2248,6 +2248,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             "monthly_bytes": monthly_bytes,
             "monthly_quota_bytes": monthly_quota,
             "monthly_bonus_bytes": monthly_bonus,
+            "monthly_packages": monthly_packages,
             "expires_at": format_expiry(user["expires_at"]),
             "monthly_reset": format_reset_schedule(int(user["monthly_reset_day"]), int(user["monthly_reset_minute"])),
         }, "sampled_at": now()})

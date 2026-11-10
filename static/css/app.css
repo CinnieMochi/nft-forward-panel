@@ -93,3 +93,7 @@ dialog{max-height:calc(100dvh - 24px);overflow:hidden}
 .package-state{font-size:11px;color:var(--green);white-space:nowrap}
 .package-state.exhausted{color:var(--red)}
 .package-rows form{margin:0}
+.metric-card-cover{position:absolute;inset:0;z-index:1;border-radius:inherit}
+.metric-card .metric-package{position:relative;z-index:2;margin-top:7px}
+.metric-card .metric-package{white-space:nowrap;font-size:10px;line-height:1.5;padding:1px 8px}
+@media (max-width:1400px){.traffic-metric{padding-right:86px}.metric-card .bandwidth-gauge{width:58px;height:58px;right:12px}.metric-card .bandwidth-gauge-copy b{font-size:12px}.metric-card strong{font-size:17px}}
