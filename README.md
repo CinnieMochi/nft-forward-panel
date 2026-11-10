@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -67,7 +67,7 @@ sudo bash /tmp/nfp-install.sh --uninstall --keep-rules --yes   # 保留 nftables
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -91,9 +91,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.3.1
+sudo bash /tmp/nfp-install.sh --version v1.3.2
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -311,8 +311,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.3.1 -m "v1.3.1"
-git push origin v1.3.1
+git tag -a v1.3.2 -m "v1.3.2"
+git push origin v1.3.2
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -354,6 +354,11 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.3.2
+
+- 修复：从 HTTP 切换为域名 HTTPS 时，**原来的公网 HTTP 端口没有被关闭**（只有卸载路径会关）。虽然切换后该端口已无人监听，但防火墙放行残留会在以后被别的服务继承。现在切换时会读取旧端口并关闭对应放行。
+- 测试：新增一个守护用例，确保 `firewall_close_port` 在卸载路径之外也有调用点。
 
 ### v1.3.1
 

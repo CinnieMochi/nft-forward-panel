@@ -419,8 +419,10 @@ fi
 new_install=0
 [[ -f "$DATA_DIR/panel.db" ]] || new_install=1
 previous_mode=""
+previous_port=""
 if [[ $new_install -eq 0 ]]; then
     previous_mode="$(existing_access_mode)"
+    previous_port="$(env_value PANEL_BIND | sed -n 's/.*:\([0-9]*\)$/\1/p')"
 fi
 
 if [[ $NON_INTERACTIVE -eq 0 ]]; then
@@ -656,6 +658,11 @@ EOF
     systemctl enable --now caddy
     systemctl reload caddy
     log "$(t caddy_done "$DOMAIN")"
+    # Leaving the old public HTTP port open after the switch would be a stale
+    # hole: nothing listens there any more, but a later service would inherit it.
+    if [[ "$previous_mode" == "http" && -n "$previous_port" ]]; then
+        firewall_close_port "$previous_port"
+    fi
 else
     rm -f "$CADDY_SNIPPET"
     if command -v caddy >/dev/null 2>&1 && systemctl is-active --quiet caddy 2>/dev/null; then

@@ -125,6 +125,13 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(expected, out)
 
 
+    def test_switching_to_https_closes_the_previous_http_port(self):
+        # firewall_close_port must be reachable outside the uninstall path:
+        # the definition plus at least two call sites (switch + uninstall).
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count("firewall_close_port"), 3)
+        self.assertIn('if [[ "$previous_mode" == "http" && -n "$previous_port" ]]', text)
+
     def test_language_question_selects_the_following_language(self):
         english = run_library_with_stdin("2\n", "ask_language; echo \"picked=$LANG_CODE\"; t access_prompt")
         chinese = run_library_with_stdin("1\n", "ask_language; echo \"picked=$LANG_CODE\"; t access_prompt")
