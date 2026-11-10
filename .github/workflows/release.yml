@@ -30,9 +30,9 @@ jobs:
 
       - name: Run test suite
         env:
+          # The suite pins its own bootstrap administrator; only the settings
+          # that must not depend on a terminal are supplied here.
           PANEL_SECRET_KEY: github-actions-test-secret
-          PANEL_ADMIN_USERNAME: admin
-          PANEL_ADMIN_PASSWORD: GitHubActionsOnly2026
           PANEL_COOKIE_SECURE: "0"
         run: |
           export PANEL_DATA_DIR="$(mktemp -d)"

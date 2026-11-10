@@ -286,7 +286,7 @@ sudo nfpctl status
 - 修复：升级后当前计费周期的已用流量被清零（老桶只有 `inbound/outbound`，新口径只算 `rx/tx`）。现在按行回退，升级不清零额度。
 - 新增：`GET /healthz` 健康检查端点，安装器用它判断面板是否真的就绪。
 - 新增：`PANEL_TIMEZONE` 环境变量（默认 `Asia/Shanghai`），缺 tz 数据库时不再导致启动崩溃。
-- 修复：测试套件长期红灯（3 个用例与实现脱节），现已全绿。
+- 修复：测试套件长期红灯——3 个用例与实现脱节，且 CI 注入的 `PANEL_ADMIN_PASSWORD` 会覆盖测试夹具的管理员口令，导致 13 个用例连锁失败。现在夹具自己钉住身份，环境不再能改变它。
 - 依赖：补 `tzdata`，Windows/macOS 上也能跑测试。
 - 安装器：仓库名和版本有了默认值（不再强制 `--repo`）；就绪检测从「sleep 2 + curl /」改为轮询 `/healthz` 最多 30 秒。
 - 流水线：Actions 锁定 commit SHA，打包后校验 SHA-256 与包内布局，校验失败不出 Release。

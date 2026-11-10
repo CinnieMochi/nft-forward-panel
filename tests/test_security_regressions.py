@@ -7,8 +7,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-os.environ.setdefault("PANEL_ADMIN_USERNAME", "admin")
-os.environ.setdefault("PANEL_ADMIN_PASSWORD", "PreviewOnly!2026")
+# The bootstrap administrator is a test fixture, so pin it instead of using
+# setdefault: an ambient PANEL_ADMIN_PASSWORD (CI injects one) would otherwise
+# change the password every login below uses.
+os.environ["PANEL_ADMIN_USERNAME"] = "admin"
+os.environ["PANEL_ADMIN_PASSWORD"] = "PreviewOnly!2026"
 os.environ.setdefault("PANEL_SECRET_KEY", "test-secret")
 # Importing app runs the module-level create_app(), which would otherwise
 # start the 2-second policy scheduler threads for the whole test process.
