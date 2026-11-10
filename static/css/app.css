@@ -77,3 +77,5 @@ dialog{max-height:calc(100dvh - 24px);overflow:hidden}
 .secret-row .icon-button{width:32px;height:32px;flex:0 0 auto}
 .secret-hint{margin:2px 0 0;font-size:12px}
 .connection-note{color:var(--muted)}
+.quota-strip strong [data-sensitive]{color:inherit;font-size:inherit;display:inline;font-variant-numeric:tabular-nums}
+.dialog-subtitle{margin:0;font-size:14px;font-weight:700;color:var(--ink)}

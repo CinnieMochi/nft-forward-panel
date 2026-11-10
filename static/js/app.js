@@ -1,12 +1,14 @@
 (() => {
-  document.querySelectorAll("[data-emoji]").forEach((node) => {
-    if (!window.twemoji) return;
-    window.twemoji.parse(node, {
-      base: "/static/vendor/twemoji/assets/",
-      folder: "svg",
-      ext: ".svg",
-    });
-  });
+  const EMOJI_OPTIONS = {
+    base: "/static/vendor/twemoji/assets/",
+    folder: "svg",
+    ext: ".svg",
+  };
+  const parseEmoji = (node) => {
+    if (!window.twemoji || !node) return;
+    window.twemoji.parse(node, EMOJI_OPTIONS);
+  };
+  document.querySelectorAll("[data-emoji]").forEach(parseEmoji);
 
   const formatBytes = (value, suffix = "") => {
     let number = Number(value) || 0;
@@ -265,6 +267,7 @@
           const count = document.createElement("strong");
           count.textContent = String(rule.connections);
           details.append(destination, state, note);
+          parseEmoji(note);
           item.append(details, count);
           list.append(item);
         });
