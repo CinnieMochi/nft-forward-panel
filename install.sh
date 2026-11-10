@@ -7,7 +7,8 @@ DATA_DIR="/var/lib/$APP_NAME"
 ENV_FILE="/etc/$APP_NAME.env"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
 CADDY_SNIPPET="/etc/caddy/conf.d/$APP_NAME.caddy"
-REPOSITORY="${NFP_REPOSITORY:-}"
+DEFAULT_REPOSITORY="CinnieMochi/nft-forward-panel"
+REPOSITORY="${NFP_REPOSITORY:-$DEFAULT_REPOSITORY}"
 RELEASE_VERSION="latest"
 DOMAIN=""
 EMAIL=""
@@ -31,6 +32,7 @@ Usage: sudo bash install.sh [options]
   --email EMAIL         ACME certificate notification email
   --admin USERNAME      Initial administrator username (default: admin)
   --repo OWNER/REPO     GitHub repository providing Releases
+                        (default: CinnieMochi/nft-forward-panel, or NFP_REPOSITORY)
   --version TAG         Release tag to install (default: latest)
   --non-interactive     Do not prompt; require all values via options/env
   -h, --help            Show this help
@@ -187,6 +189,7 @@ PANEL_TRUSTED_PROXY_COUNT=1
 PANEL_POLICY_SCHEDULER=1
 PANEL_LOGIN_WINDOW_SECONDS=600
 PANEL_LOGIN_MAX_ATTEMPTS=20
+PANEL_TIMEZONE=Asia/Shanghai
 EOF
 } > "$ENV_FILE"
 chmod 0600 "$ENV_FILE"
@@ -206,8 +209,8 @@ systemctl enable --now nftables
 cp "$INSTALL_DIR/deploy/$APP_NAME.service" "$SERVICE_FILE"
 ln -sfn "$INSTALL_DIR/nft.sh" /usr/local/sbin/nfpctl
 systemctl daemon-reload
-systemctl enable --now "$APP_NAME"
-systemctl restart "$APP_NAME"
+systemctl enable "$APP_NAME"
+systemctl restart "$APP_NAME" || warn "first start returned non-zero; waiting for readiness below"
 
 install -d -o caddy -g caddy -m 0750 /etc/caddy/conf.d /var/log/caddy
 [[ -f /etc/caddy/Caddyfile ]] || install -o root -g root -m 0644 /dev/null /etc/caddy/Caddyfile
@@ -243,9 +246,17 @@ fi
 systemctl enable --now caddy
 systemctl reload caddy
 
-sleep 2
-systemctl is-active --quiet "$APP_NAME" || die "panel failed; inspect: journalctl -u $APP_NAME -n 100"
-curl -fsS -o /dev/null http://127.0.0.1:8108/ || die "panel did not respond on 127.0.0.1:8108"
+ready=0
+for _ in $(seq 1 30); do
+    if systemctl is-active --quiet "$APP_NAME" \
+        && curl -fsS -o /dev/null http://127.0.0.1:8108/healthz; then
+        ready=1
+        break
+    fi
+    sleep 1
+done
+[[ $ready -eq 1 ]] || die "panel did not answer /healthz on 127.0.0.1:8108; inspect: journalctl -u $APP_NAME -n 100"
+log "panel is answering on 127.0.0.1:8108"
 if [[ $new_install -eq 1 ]]; then
     sed -i '/^PANEL_ADMIN_PASSWORD=/d' "$ENV_FILE"
 fi

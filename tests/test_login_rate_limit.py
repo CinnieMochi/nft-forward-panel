@@ -8,6 +8,9 @@ from unittest.mock import patch
 os.environ.setdefault("PANEL_ADMIN_USERNAME", "admin")
 os.environ.setdefault("PANEL_ADMIN_PASSWORD", "PreviewOnly!2026")
 os.environ.setdefault("PANEL_SECRET_KEY", "test-secret")
+# Importing app runs the module-level create_app(), which would otherwise
+# start the 2-second policy scheduler threads for the whole test process.
+os.environ.setdefault("PANEL_POLICY_SCHEDULER", "0")
 os.environ.setdefault("PANEL_DATA_DIR", tempfile.mkdtemp(prefix="rate-limit-import-"))
 
 import app

@@ -17,11 +17,11 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterator
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, current_app, flash, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -38,7 +38,24 @@ LOGIN_MAX_ATTEMPTS = max(5, int(os.environ.get("PANEL_LOGIN_MAX_ATTEMPTS", "20")
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 _apply_lock = threading.RLock()
 UTC_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
-PANEL_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _resolve_panel_timezone() -> tzinfo:
+    """Resolve PANEL_TIMEZONE, falling back to Asia/Shanghai and then UTC.
+
+    A host without any tz database must still boot, so candidates that cannot
+    be loaded are skipped instead of raised.
+    """
+    requested = (os.environ.get("PANEL_TIMEZONE") or "").strip() or "Asia/Shanghai"
+    for candidate in (requested, "Asia/Shanghai", "UTC"):
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    return timezone.utc
+
+
+PANEL_TIMEZONE = _resolve_panel_timezone()
 POLICY_INTERVAL_SECONDS = 2
 LIVE_CACHE_SECONDS = 2.0
 _live_cache_lock = threading.Lock()
@@ -745,8 +762,14 @@ def measured_monthly_usage(
     at: datetime | None = None,
 ) -> int:
     start = monthly_cycle_start(user, at).strftime(UTC_TIME_FORMAT)
+    # Buckets written before the wire-direction counters existed only carry
+    # inbound/outbound, so billing on rx+tx alone would silently reset every
+    # account's current-cycle usage on upgrade. Fall back per row: rows without
+    # any wire sample are billed on the logical pair, newer rows on rx+tx.
     row = connection.execute(
-        "SELECT COALESCE(SUM(rx_bytes) + SUM(tx_bytes), 0) FROM traffic_buckets WHERE owner_id=? AND bucket_at>=?",
+        "SELECT COALESCE(SUM(CASE WHEN rx_bytes = 0 AND tx_bytes = 0 "
+        "THEN inbound_bytes + outbound_bytes ELSE rx_bytes + tx_bytes END), 0) "
+        "FROM traffic_buckets WHERE owner_id=? AND bucket_at>=?",
         (user["id"], start),
     ).fetchone()
     return int(row[0])
@@ -1063,11 +1086,17 @@ def start_policy_scheduler(app: Flask) -> None:
     if not app.config.get("POLICY_SCHEDULER_ENABLED", True):
         return
 
+    # Bind the targets now.  Looking them up by module-global name on every
+    # tick would let anything that rebinds app.reconcile_rule_state (a test
+    # patch, for instance) silently capture the background loop.
+    reconcile = reconcile_rule_state
+    observe = refresh_live_observability
+
     def worker() -> None:
         while True:
             started = time.monotonic()
             try:
-                reconcile_rule_state(app)
+                reconcile(app)
             except Exception:
                 app.logger.exception("Rule policy reconciliation failed")
             time.sleep(max(0.1, POLICY_INTERVAL_SECONDS - (time.monotonic() - started)))
@@ -1076,7 +1105,7 @@ def start_policy_scheduler(app: Flask) -> None:
         while True:
             started = time.monotonic()
             try:
-                refresh_live_observability(app)
+                observe(app)
             except Exception:
                 app.logger.exception("Live connection and latency refresh failed")
             time.sleep(max(0.1, LIVE_CACHE_SECONDS - (time.monotonic() - started)))
@@ -1132,6 +1161,15 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         if request.is_secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
+
+    @app.get("/healthz")
+    def healthz() -> Any:
+        """Readiness probe for the installer and the reverse proxy.
+
+        Deliberately unauthenticated and database-free so it stays cheap and
+        reveals nothing beyond "the WSGI app answered".
+        """
+        return jsonify({"status": "ok"})
 
     @app.get("/")
     @login_required

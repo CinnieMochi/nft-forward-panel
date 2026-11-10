@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("PANEL_ADMIN_USERNAME", "admin")
 os.environ.setdefault("PANEL_ADMIN_PASSWORD", "PreviewOnly!2026")
 os.environ.setdefault("PANEL_SECRET_KEY", "test-secret")
+# Importing app runs the module-level create_app(), which would otherwise
+# start the 2-second policy scheduler threads for the whole test process.
+os.environ.setdefault("PANEL_POLICY_SCHEDULER", "0")
 os.environ.setdefault("PANEL_DATA_DIR", tempfile.mkdtemp(prefix="security-import-"))
 
 from app import (
@@ -109,6 +112,11 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("object-src 'none'", response.headers["Content-Security-Policy"])
         self.assertIn("max-age=31536000", response.headers["Strict-Transport-Security"])
         self.assertIn("camera=()", response.headers["Permissions-Policy"])
+
+    def test_health_endpoint_is_unauthenticated_and_reports_ok(self):
+        response = self.web.test_client().get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "ok"})
 
     def test_toggle_reconciles_rules_immediately(self):
         admin = self.web.test_client()
@@ -389,7 +397,12 @@ class SecurityRegressionTests(unittest.TestCase):
 
             self.assertEqual(
                 result[rule_id],
-                {"inbound_bps": 321.5, "outbound_bps": 654.5},
+                {
+                    "inbound_bps": 321.5,
+                    "outbound_bps": 654.5,
+                    "rx_bps": 0.0,
+                    "tx_bps": 0.0,
+                },
             )
             state = connection.execute(
                 """SELECT inbound_bytes, outbound_bytes, sampled_at,

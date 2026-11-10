@@ -53,27 +53,29 @@ class ValidationTests(unittest.TestCase):
         ])
         self.assertNotIn("chain traffic_prerouting", rendered)
         self.assertNotIn("chain traffic_postrouting", rendered)
-        self.assertEqual(rendered.count("type filter hook forward priority 10; policy accept;"), 1)
-        self.assertIn(
-            'ip daddr 141.11.219.150 tcp dport 19849 ct status dnat '
-            'ct original protocol tcp ct original proto-dst 10110 counter '
-            'comment "nfp:traffic-out:10110"',
-            rendered,
-        )
-        self.assertIn(
-            'ip daddr 141.11.219.150 udp dport 19849 ct status dnat '
-            'ct original protocol udp ct original proto-dst 10110 counter '
-            'comment "nfp:traffic-out:10110"',
-            rendered,
-        )
-        self.assertIn(
-            'ip saddr 141.11.219.150 tcp sport 19849 ct status dnat '
-            'ct original protocol tcp ct original proto-dst 10110 counter '
-            'limit rate over 1000 kbytes/second drop comment "nfp:traffic-in:10110"',
-            rendered,
-        )
-        self.assertEqual(rendered.count('comment "nfp:traffic-in:10110"'), 2)
-        self.assertEqual(rendered.count('comment "nfp:traffic-out:10110"'), 2)
+        # Exactly one forward hook owns the per-rule jump; the billing counters
+        # themselves live in the directional chains it jumps into.
+        self.assertEqual(rendered.count("type filter hook forward priority"), 1)
+        self.assertIn("chain nfp_out_10110 {", rendered)
+        self.assertIn("chain nfp_in_10110 {", rendered)
+        for protocol in ("tcp", "udp"):
+            self.assertIn(
+                f"ip daddr 141.11.219.150 {protocol} dport 19849 ct status dnat "
+                f"ct original protocol {protocol} ct original proto-dst 10110 "
+                f"jump nfp_out_10110",
+                rendered,
+            )
+            self.assertIn(
+                f"ip saddr 141.11.219.150 {protocol} sport 19849 ct status dnat "
+                f"ct original protocol {protocol} ct original proto-dst 10110 "
+                f"jump nfp_in_10110",
+                rendered,
+            )
+        self.assertEqual(rendered.count('comment "nfp:traffic-in:10110"'), 1)
+        self.assertEqual(rendered.count('comment "nfp:traffic-out:10110"'), 1)
+        # Only the inbound chain polices ingress: 8 Mbps becomes 1000 kbytes/s.
+        self.assertEqual(rendered.count("limit rate over"), 1)
+        self.assertIn("limit rate over 1000 kbytes/second drop", rendered)
         self.assertNotIn("nfp:limit-", rendered)
 
     def test_firewall_close_can_keep_listen_port_when_only_target_changes(self):
