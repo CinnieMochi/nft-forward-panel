@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.5/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.5/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.5/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.6/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.5
+sudo bash /tmp/nfp-install.sh --version v1.2.6
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -189,6 +189,18 @@ server {
   > 当前密码**无法查看**：数据库里只存单向哈希（Werkzeug PBKDF2），任何人包括管理员都不可逆推。这是刻意的安全设计，也是"忘记密码只能重置"的原因。
 - **实时连接页**：每条规则的**备注**会一并显示，方便辨认是哪条业务；备注在这里**只读**，要改请去「概览与规则」。
 
+## 流量包（临时额度）
+
+计费周期内额度不够时，管理员可以在「用户与策略」的**本期流量**列点「流量包」追加临时额度：
+
+- 一个账户可以加**多个**包，列表里每个包显示大小、已用量与到期时间；**用完的包标红「已用尽」**。
+- 生命周期与账单周期一致：**到该账户的月流量重置时刻，所有流量包自动失效**，下个周期只剩策略里配置的额度——无论有没有用完。
+- 消耗顺序是确定的：先扣基础额度，再按添加顺序依次消耗流量包。因此每个包的"已用"是真实可核算的，不会随机的把用量摊到多个包上。
+- 包可以随时删除，删除后额度立即收回；增删都会写审计（`package_add` / `package_delete`）。
+- 「不限量」账户（月额度为 0）不允许加包——它本来就不受限。
+
+可用额度 = 基础月额度 + 本周期内所有流量包之和，概览页的额度进度环与暂停判定都按这个口径。
+
 ## SSH 备用管理（nfpctl）
 
 WebUI 或反代挂掉时，用同一套后端继续管理。需要 root，读 `/etc/nft-forward-panel.env` 的路径配置，与 WebUI **共用数据库、审计、校验、渲染、文件锁和回滚**。
@@ -266,8 +278,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.5 -m "v1.2.5"
-git push origin v1.2.5
+git tag -a v1.2.6 -m "v1.2.6"
+git push origin v1.2.6
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -309,6 +321,14 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.2.6
+
+- 新增：**流量包**。管理员可在「用户与策略」的「本期流量」列给账户追加临时额度，一个账户可加多个，每包单独显示用量与到期时间，用完标红「已用尽」。
+- 规则：流量包**只在本计费周期有效**，到该账户的重置时刻自动失效，下个周期仍然只有策略里配置的额度；额度按「基础额度先用完，再按添加顺序消耗流量包」计算，因此每个包的用量是确定的。
+- 新增：流量包可随时删除（额度立即收回），增删都会写审计（`package_add` / `package_delete`）。
+- 限制：月流量为「不限量」的账户不允许添加流量包（没有意义），接口会直接拒绝。
+- 改名：「本月流量」统一改为**「本期流量」**（用户表、概览卡片、流量统计页），与"计费周期"语义一致。
 
 ### v1.2.5
 

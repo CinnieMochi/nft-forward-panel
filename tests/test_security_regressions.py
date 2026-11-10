@@ -22,7 +22,10 @@ from app import (
     create_app,
     desired_pause_reason,
     desired_rule_pause_reason,
+    monthly_cycle_end,
+    monthly_cycle_start,
     now,
+    package_breakdown,
     reconcile_rule_state,
     validate_rule_note,
 )
@@ -1325,6 +1328,137 @@ class SecurityRegressionTests(unittest.TestCase):
             payload = admin.get("/api/overview").get_json()
         notes = {rule["listen_port"]: rule["note"] for rule in payload["rules"]}
         self.assertEqual(notes.get(10123), "香港入口")
+
+    def test_admin_can_add_traffic_package_for_current_cycle(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        connection.row_factory = sqlite3.Row
+        try:
+            member = connection.execute("SELECT * FROM users WHERE username='member'").fetchone()
+            member_id = int(member["id"])
+            connection.execute(
+                "UPDATE users SET monthly_quota_bytes=? WHERE id=?", (500 * 1024 ** 3, member_id)
+            )
+            connection.commit()
+            member = connection.execute("SELECT * FROM users WHERE id=?", (member_id,)).fetchone()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        response = admin.post(
+            f"/users/{member_id}/packages",
+            data={"csrf_token": token, "size_gib": "2", "note": "临时补偿"},
+        )
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        connection.row_factory = sqlite3.Row
+        try:
+            package = connection.execute(
+                "SELECT * FROM traffic_packages WHERE owner_id=?", (member_id,)
+            ).fetchone()
+            audit = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE action='package_add'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIsNotNone(package)
+        self.assertEqual(int(package["bytes"]), 2 * 1024 ** 3)
+        self.assertEqual(
+            package["cycle_start"], monthly_cycle_start(member).strftime("%Y-%m-%d %H:%M:%S UTC")
+        )
+        self.assertEqual(
+            package["expires_at"], monthly_cycle_end(member).strftime("%Y-%m-%d %H:%M:%S UTC")
+        )
+        self.assertGreaterEqual(audit, 1)
+
+    def test_package_drains_after_base_quota_and_is_exhausted(self):
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        connection.row_factory = sqlite3.Row
+        try:
+            member = connection.execute("SELECT * FROM users WHERE username='member'").fetchone()
+            member_id = int(member["id"])
+            connection.execute("UPDATE users SET monthly_quota_bytes=100 WHERE id=?", (member_id,))
+            connection.commit()
+            member = connection.execute("SELECT * FROM users WHERE id=?", (member_id,)).fetchone()
+            cycle = monthly_cycle_start(member).strftime("%Y-%m-%d %H:%M:%S UTC")
+            expiry = monthly_cycle_end(member).strftime("%Y-%m-%d %H:%M:%S UTC")
+            connection.execute(
+                "INSERT INTO traffic_packages (owner_id, bytes, cycle_start, expires_at, note, created_at) "
+                "VALUES (?, 100, ?, ?, '', ?)",
+                (member_id, cycle, expiry, now()),
+            )
+            connection.commit()
+
+            total, items = package_breakdown(connection, member, 150)
+            self.assertEqual(total, 100)
+            self.assertEqual(items[0]["used"], 50)
+            self.assertFalse(items[0]["exhausted"])
+            # 100 base + 100 package covers 150, so the account is not throttled
+            self.assertEqual(desired_pause_reason(member, 150, bonus_bytes=total), "")
+
+            total, items = package_breakdown(connection, member, 250)
+            self.assertEqual(items[0]["used"], 100)
+            self.assertTrue(items[0]["exhausted"])
+            self.assertEqual(desired_pause_reason(member, 250, bonus_bytes=total), "quota")
+
+            # next billing cycle: the package is gone, only the plan quota remains
+            next_cycle = monthly_cycle_end(member) + timedelta(seconds=1)
+            total_next, items_next = package_breakdown(connection, member, 0, next_cycle)
+            self.assertEqual(total_next, 0)
+            self.assertEqual(items_next, [])
+        finally:
+            connection.close()
+
+    def test_package_endpoints_are_admin_only_and_deletable(self):
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+        finally:
+            connection.close()
+        # a plain user cannot hand themselves free quota
+        member = self.web.test_client()
+        self.login(member, "member", "MemberPass!2026")
+        member_token = csrf_token(member.get("/profile"))
+        self.assertEqual(
+            member.post(f"/users/{member_id}/packages", data={"csrf_token": member_token, "size_gib": "10"}).status_code,
+            403,
+        )
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        token = csrf_token(admin.get("/users"))
+        # an unlimited account has nothing to extend, so the panel refuses
+        admin.post(f"/users/{member_id}/packages", data={"csrf_token": token, "size_gib": "1"})
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM traffic_packages WHERE owner_id=?", (member_id,)
+                ).fetchone()[0],
+                0,
+            )
+            connection.execute(
+                "UPDATE users SET monthly_quota_bytes=? WHERE id=?", (100 * 1024 ** 3, member_id)
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        admin.post(f"/users/{member_id}/packages", data={"csrf_token": token, "size_gib": "1"})
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            package_id = connection.execute(
+                "SELECT id FROM traffic_packages WHERE owner_id=?", (member_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        admin.post(f"/users/{member_id}/packages/{package_id}/delete", data={"csrf_token": token})
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            left = connection.execute(
+                "SELECT COUNT(*) FROM traffic_packages WHERE owner_id=?", (member_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(left, 0)
 
 
 if __name__ == "__main__":

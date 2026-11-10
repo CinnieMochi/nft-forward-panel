@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.2.5"
+PANEL_VERSION = "1.2.6"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0
@@ -406,6 +406,17 @@ def init_schema(app: Flask) -> None:
             CREATE INDEX IF NOT EXISTS idx_rules_owner ON forward_rules(owner_id);
             CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_traffic_owner_time ON traffic_buckets(owner_id, bucket_at);
+            CREATE TABLE IF NOT EXISTS traffic_packages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                bytes INTEGER NOT NULL CHECK(bytes > 0),
+                cycle_start TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_packages_owner_cycle
+                ON traffic_packages(owner_id, cycle_start);
             """
         )
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
@@ -796,7 +807,77 @@ def monthly_usage(connection: sqlite3.Connection, user: sqlite3.Row | dict[str, 
     return max(0, measured_monthly_usage(connection, user, at) + offset)
 
 
-def desired_pause_reason(user: sqlite3.Row | dict[str, Any], usage: int, at: datetime | None = None) -> str:
+def monthly_cycle_end(user: sqlite3.Row | dict[str, Any], at: datetime | None = None) -> datetime:
+    """Return the instant this billing cycle ends (the next reset boundary)."""
+    start = monthly_cycle_start(user, at)
+    return monthly_cycle_start(user, start + timedelta(days=32))
+
+
+def human_bytes(value: int) -> str:
+    size = float(max(0, int(value)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            text = f"{size:.1f}".rstrip("0").rstrip(".")
+            return f"{text} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def package_breakdown(
+    connection: sqlite3.Connection,
+    user: sqlite3.Row | dict[str, Any],
+    usage: int,
+    at: datetime | None = None,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Split this cycle's add-on packages and work out how much of each is used.
+
+    Base quota is consumed first, then packages oldest-first, so a package only
+    starts draining once everything before it is gone.
+    """
+    cycle = monthly_cycle_start(user, at).strftime(UTC_TIME_FORMAT)
+    rows = connection.execute(
+        "SELECT * FROM traffic_packages WHERE owner_id = ? AND cycle_start = ? ORDER BY id",
+        (user["id"], cycle),
+    ).fetchall()
+    base = int(user["monthly_quota_bytes"])
+    remaining = 0 if not base else max(0, int(usage) - base)
+    total = 0
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        size = int(row["bytes"])
+        total += size
+        used = min(remaining, size)
+        remaining -= used
+        items.append(
+            {
+                "id": int(row["id"]),
+                "bytes": size,
+                "used": used,
+                "exhausted": used >= size,
+                "label": human_bytes(size),
+                "used_label": human_bytes(used),
+                "expires_at": row["expires_at"],
+                "note": row["note"],
+                "created_at": row["created_at"],
+            }
+        )
+    return total, items
+
+
+def package_bytes(
+    connection: sqlite3.Connection, user: sqlite3.Row | dict[str, Any], at: datetime | None = None
+) -> int:
+    return package_breakdown(connection, user, 0, at)[0]
+
+
+def desired_pause_reason(
+    user: sqlite3.Row | dict[str, Any],
+    usage: int,
+    at: datetime | None = None,
+    bonus_bytes: int = 0,
+) -> str:
     if not int(user["active"]):
         return "disabled"
     current = at or datetime.now(timezone.utc)
@@ -804,7 +885,7 @@ def desired_pause_reason(user: sqlite3.Row | dict[str, Any], usage: int, at: dat
     if expiry is not None and current >= expiry:
         return "expired"
     quota = int(user["monthly_quota_bytes"])
-    if quota and usage >= quota:
+    if quota and usage >= quota + max(0, int(bonus_bytes)):
         return "quota"
     return ""
 
@@ -814,8 +895,9 @@ def desired_rule_pause_reason(
     user: sqlite3.Row | dict[str, Any],
     usage: int,
     at: datetime | None = None,
+    bonus_bytes: int = 0,
 ) -> str:
-    account_reason = desired_pause_reason(user, usage, at)
+    account_reason = desired_pause_reason(user, usage, at, bonus_bytes)
     if account_reason:
         return account_reason
     if not int(user["port_min"]) <= int(rule["listen_port"]) <= int(user["port_max"]):
@@ -1102,17 +1184,20 @@ def reconcile_rule_state(app: Flask, at: datetime | None = None, force_apply: bo
                 for owner in connection.execute("SELECT * FROM users").fetchall()
             }
             usage_by_owner: dict[int, int] = {}
+            bonus_by_owner: dict[int, int] = {}
             reasons: dict[int, str] = {}
             for row in rows:
                 owner_id = int(row["owner_id"])
                 owner = owners[owner_id]
                 if owner_id not in usage_by_owner:
                     usage_by_owner[owner_id] = monthly_usage(connection, owner, check_time)
+                    bonus_by_owner[owner_id] = package_bytes(connection, owner, check_time)
                 reasons[int(row["id"])] = desired_rule_pause_reason(
                     row,
                     owner,
                     usage_by_owner[owner_id],
                     check_time,
+                    bonus_by_owner[owner_id],
                 )
             changed = [row for row in rows if (row["paused_reason"] or "") != reasons[int(row["id"])]]
             if not changed and not force_apply:
@@ -1461,7 +1546,8 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     TrafficMonitor(manager).sample(connection, existing)
                 owner = connection.execute("SELECT * FROM users WHERE id = ?", (owner_id,)).fetchone()
                 owner_usage = monthly_usage(connection, owner)
-                initial_pause = desired_pause_reason(owner, owner_usage)
+                owner_bonus = package_bytes(connection, owner)
+                initial_pause = desired_pause_reason(owner, owner_usage, bonus_bytes=owner_bonus)
                 candidates = [row_to_rule(item) for item in existing if not item["paused_reason"]]
                 if not initial_pause:
                     candidates.append(new_rule)
@@ -1675,7 +1761,16 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         for account in connection.execute("SELECT * FROM users ORDER BY role DESC, username").fetchall():
             item = dict(account)
             item["monthly_bytes"] = monthly_usage(connection, account)
-            item["effective_state"] = desired_pause_reason(account, item["monthly_bytes"]) or ("" if account["active"] else "disabled")
+            bonus, packages = package_breakdown(connection, account, item["monthly_bytes"])
+            item["packages"] = packages
+            item["package_total"] = bonus
+            item["package_total_label"] = human_bytes(bonus) if bonus else ""
+            item["quota_with_bonus"] = int(account["monthly_quota_bytes"]) + bonus if int(account["monthly_quota_bytes"]) else 0
+            item["cycle_ends"] = monthly_cycle_end(account).strftime(UTC_TIME_FORMAT)
+            item["effective_state"] = (
+                desired_pause_reason(account, item["monthly_bytes"], bonus_bytes=bonus)
+                or ("" if account["active"] else "disabled")
+            )
             records.append(item)
         return render_template("users.html", **page_context(users=records))
 
@@ -1998,6 +2093,77 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 flash("账户及其历史流量记录已删除。", "success")
         return redirect(url_for("users"))
 
+    @app.post("/users/<int:user_id>/packages")
+    @admin_required
+    def add_traffic_package(user_id: int) -> Any:
+        require_csrf()
+        try:
+            size_gib = parse_bounded_float(request.form.get("size_gib"), "流量包大小", 0.01, 1048576)
+            note = (request.form.get("note") or "").strip()[:80]
+            connection = get_db()
+            target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if target is None:
+                raise ValueError("账户不存在。")
+            if not int(target["monthly_quota_bytes"]):
+                raise ValueError("该账户的月流量额度是不限量，添加流量包没有意义。")
+            cycle_start = monthly_cycle_start(target).strftime(UTC_TIME_FORMAT)
+            expires_at = monthly_cycle_end(target).strftime(UTC_TIME_FORMAT)
+            size_bytes = int(round(size_gib * 1024 ** 3))
+            if size_bytes < 1:
+                raise ValueError("流量包大小不能小于 1 字节。")
+            with ApplyLock(Path(app.config["DATA_DIR"])):
+                connection.execute(
+                    "INSERT INTO traffic_packages (owner_id, bytes, cycle_start, expires_at, note, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, size_bytes, cycle_start, expires_at, note, now()),
+                )
+                add_audit(
+                    "package_add",
+                    target["identity_id"],
+                    f"username={target['username']}; size_bytes={size_bytes}; "
+                    f"cycle_start={cycle_start}; expires_at={expires_at}; note={note or '(empty)'}",
+                )
+                connection.commit()
+            try:
+                reconcile_rule_state(app, force_apply=False)
+            except Exception:
+                app.logger.exception("Package change could not be applied immediately")
+            flash(
+                f"已为 {target['username']} 添加 {human_bytes(size_bytes)} 流量包，"
+                "本计费周期结束时自动失效。",
+                "success",
+            )
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("users"))
+
+    @app.post("/users/<int:user_id>/packages/<int:package_id>/delete")
+    @admin_required
+    def delete_traffic_package(user_id: int, package_id: int) -> Any:
+        require_csrf()
+        connection = get_db()
+        row = connection.execute(
+            "SELECT * FROM traffic_packages WHERE id = ? AND owner_id = ?", (package_id, user_id)
+        ).fetchone()
+        if row is None:
+            flash("流量包不存在或不属于该账户。", "error")
+        else:
+            target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            with ApplyLock(Path(app.config["DATA_DIR"])):
+                connection.execute("DELETE FROM traffic_packages WHERE id = ?", (package_id,))
+                add_audit(
+                    "package_delete",
+                    target["identity_id"] if target else str(user_id),
+                    f"package_id={package_id}; bytes={row['bytes']}",
+                )
+                connection.commit()
+            try:
+                reconcile_rule_state(app, force_apply=False)
+            except Exception:
+                app.logger.exception("Package removal could not be applied immediately")
+            flash("流量包已删除。", "success")
+        return redirect(url_for("users"))
+
     def visible_rules(connection: sqlite3.Connection, user: sqlite3.Row) -> list[sqlite3.Row]:
         sql = "SELECT r.*, u.username AS owner_name, u.identity_id AS owner_identity_id, u.expires_at AS owner_expires_at, u.monthly_reset_day AS owner_reset_day, u.monthly_reset_minute AS owner_reset_minute FROM forward_rules r JOIN users u ON u.id=r.owner_id"
         if user["role"] == "admin":
@@ -2049,7 +2215,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "inbound_limit_mbps": rule["inbound_limit_mbps"], "outbound_limit_mbps": rule["outbound_limit_mbps"],
             })
         monthly_bytes = monthly_usage(connection, user)
+        monthly_bonus = package_bytes(connection, user)
         monthly_quota = int(user["monthly_quota_bytes"])
+        if monthly_quota:
+            monthly_quota += monthly_bonus
         current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         previous_hour = current_hour - timedelta(hours=1)
         previous_params: list[Any] = [previous_hour.strftime(UTC_TIME_FORMAT), current_hour.strftime(UTC_TIME_FORMAT)]
@@ -2078,6 +2247,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             "previous_hour_tx_bytes": int(previous_usage[3]),
             "monthly_bytes": monthly_bytes,
             "monthly_quota_bytes": monthly_quota,
+            "monthly_bonus_bytes": monthly_bonus,
             "expires_at": format_expiry(user["expires_at"]),
             "monthly_reset": format_reset_schedule(int(user["monthly_reset_day"]), int(user["monthly_reset_minute"])),
         }, "sampled_at": now()})
