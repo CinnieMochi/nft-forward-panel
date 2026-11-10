@@ -484,4 +484,149 @@
   const initialRange = document.querySelector("[data-range] .active")?.dataset.rangeValue;
   if (initialRange && initialRange !== "live") loadHistory(initialRange);
   if (overview) window.setInterval(loadOverview, 1000);
+
+  // --- version dialog and in-panel update -------------------------------
+  const versionDialog = document.getElementById("version-dialog");
+  if (versionDialog) {
+    const currentEl = versionDialog.querySelector("[data-version-current]");
+    const latestEl = versionDialog.querySelector("[data-version-latest]");
+    const noteEl = versionDialog.querySelector("[data-version-note]");
+    const statusEl = versionDialog.querySelector("[data-version-status]");
+    const checkBtn = versionDialog.querySelector("[data-version-check]");
+    const updateBtn = versionDialog.querySelector("[data-version-update]");
+    const linkEl = versionDialog.querySelector("[data-version-link]");
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
+    const ACTIVE = /queued|checking|downloading|installing|restarting/;
+    let pendingTag = "";
+    let pollTimer = 0;
+
+    const showStatus = (text, tone) => {
+      if (!text) { statusEl.hidden = true; return; }
+      statusEl.hidden = false;
+      statusEl.textContent = text;
+      statusEl.classList.toggle("warn", tone === "warn");
+    };
+
+    const render = (data) => {
+      currentEl.textContent = "v" + data.current;
+      latestEl.textContent = data.latest_known ? "v" + data.latest : "查询失败";
+      const active = ACTIVE.test(String(data.status?.phase || ""));
+      if (!data.latest_known) {
+        noteEl.textContent = "面板无法连接 GitHub，请检查服务器出网。";
+        noteEl.classList.add("warn");
+        updateBtn.hidden = true;
+      } else if (data.update_available) {
+        noteEl.textContent = "有新版本可用。";
+        noteEl.classList.add("warn");
+        pendingTag = "v" + data.latest;
+        updateBtn.hidden = !(data.can_update && !active);
+      } else {
+        noteEl.textContent = "已经是最新版本。";
+        noteEl.classList.remove("warn");
+        updateBtn.hidden = true;
+      }
+      if (data.release_url) linkEl.href = data.release_url;
+      if (active && data.can_update) {
+        showStatus(String(data.status.message || "更新进行中…"));
+        startPolling();
+      }
+    };
+
+    const loadVersion = async (refresh) => {
+      try {
+        const response = await fetch("/api/version" + (refresh ? "?refresh=1" : ""), {headers: {Accept: "application/json"}});
+        if (!response.ok) throw new Error("status " + response.status);
+        render(await response.json());
+        return true;
+      } catch (_) {
+        latestEl.textContent = "查询失败";
+        noteEl.textContent = "面板暂时无法获取版本信息。";
+        return false;
+      }
+    };
+
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/update-status", {headers: {Accept: "application/json"}});
+        const status = await response.json();
+        const phase = String(status.phase || "idle");
+        if (phase === "done") {
+          showStatus("更新完成，页面即将刷新。");
+          window.clearInterval(pollTimer);
+          window.setTimeout(() => window.location.reload(), 2500);
+          return;
+        }
+        if (phase === "failed") {
+          showStatus(String(status.message || "更新失败"), "warn");
+          window.clearInterval(pollTimer);
+          updateBtn.disabled = false;
+          loadVersion(true);
+          return;
+        }
+        if (ACTIVE.test(phase)) showStatus(String(status.message || "更新进行中…"));
+      } catch (_) { /* the panel restarts during the update; keep polling */ }
+    };
+
+    const startPolling = () => {
+      if (pollTimer) return;
+      pollTimer = window.setInterval(poll, 2000);
+    };
+
+    document.querySelectorAll('[data-dialog-open="version-dialog"]').forEach((button) => {
+      button.addEventListener("click", () => loadVersion(false));
+    });
+
+    checkBtn?.addEventListener("click", async () => {
+      checkBtn.disabled = true;
+      checkBtn.textContent = "查询中…";
+      await loadVersion(true);
+      checkBtn.disabled = false;
+      checkBtn.textContent = "检查最新版";
+    });
+
+    updateBtn?.addEventListener("click", async () => {
+      if (!pendingTag) return;
+      if (!window.confirm("将下载并安装 " + pendingTag + "，面板会重启数秒。继续？")) return;
+      updateBtn.disabled = true;
+      showStatus("正在启动更新任务…");
+      const body = new URLSearchParams({csrf_token: csrf, tag: pendingTag});
+      try {
+        const response = await fetch("/api/update", {
+          method: "POST",
+          headers: {"Content-Type": "application/x-www-form-urlencoded", Accept: "application/json"},
+          body,
+        });
+        const data = await response.json();
+        showStatus(data.message, data.ok ? undefined : "warn");
+        if (data.ok) { startPolling(); poll(); } else { updateBtn.disabled = false; }
+      } catch (_) {
+        showStatus("更新请求发送失败。", "warn");
+        updateBtn.disabled = false;
+      }
+    });
+  }
+
+  // --- hide/show listen ports and target addresses ----------------------
+  const maskToggle = document.querySelector("[data-toggle-mask]");
+  if (maskToggle) {
+    const KEY = "mochi-mask-sensitive";
+    const applyMask = (masked) => {
+      document.querySelectorAll("[data-sensitive]").forEach((cell) => {
+        if (masked) {
+          if (!cell.dataset.originalHtml) cell.dataset.originalHtml = cell.innerHTML;
+          cell.innerHTML = '<span class="masked-value">••••••</span>';
+        } else if (cell.dataset.originalHtml) {
+          cell.innerHTML = cell.dataset.originalHtml;
+        }
+      });
+      maskToggle.textContent = masked ? "◌" : "◉";
+      maskToggle.setAttribute("aria-pressed", String(masked));
+      const label = masked ? "显示端口与目标地址" : "隐藏端口与目标地址";
+      maskToggle.setAttribute("aria-label", label);
+      maskToggle.setAttribute("title", label);
+      window.localStorage.setItem(KEY, masked ? "1" : "0");
+    };
+    maskToggle.addEventListener("click", () => applyMask(maskToggle.getAttribute("aria-pressed") !== "true"));
+    if (window.localStorage.getItem(KEY) === "1") applyMask(true);
+  }
 })();

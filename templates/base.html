@@ -27,7 +27,10 @@
       <p>账户</p>
       <a class="nav-link" href="{{ url_for('profile') }}"><span>◇</span>个人信息</a>
     </nav>
-    <div class="sidebar-status"><i></i> 控制台运行中</div>
+    <button class="sidebar-status" type="button" data-dialog-open="version-dialog" title="查看版本信息" aria-label="查看版本信息">
+      <span class="status-line"><i></i> 控制台运行中</span>
+      <span class="version-chip">v{{ panel_version }}</span>
+    </button>
   </aside>
   <button class="sidebar-backdrop" type="button" aria-label="关闭导航" tabindex="-1"></button>
   <header class="topbar">
@@ -39,6 +42,22 @@
       <form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="icon-button" title="退出登录" aria-label="退出登录" type="submit">↪</button></form>
     </div>
   </header>
+  {% if user %}<dialog id="version-dialog" class="version-dialog"><div class="dialog-card">
+    <div class="panel-heading"><div><h2>版本信息</h2><p>当前面板版本与 GitHub 上的最新发布</p></div><button class="icon-button" type="button" data-dialog-close aria-label="关闭">×</button></div>
+    <div class="dialog-body">
+      <ul class="version-list">
+        <li><span>当前版本</span><strong data-version-current>v{{ panel_version }}</strong></li>
+        <li><span>最新版本</span><strong data-version-latest>未查询</strong></li>
+      </ul>
+      <p class="version-note" data-version-note>点击「检查最新版」向 GitHub 查询。</p>
+      <p class="version-note success" data-version-status hidden></p>
+    </div>
+    <div class="dialog-actions">
+      <a class="button secondary" data-version-link href="https://github.com/CinnieMochi/nft-forward-panel/releases" target="_blank" rel="noopener noreferrer">更新日志</a>
+      <button class="button secondary" type="button" data-version-check>检查最新版</button>
+      <button class="button primary" type="button" data-version-update hidden>立即更新</button>
+    </div>
+  </div></dialog>{% endif %}
   {% endif %}
   <main class="{% block main_class %}shell{% endblock %}">
     {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<div class="notice {{ category }}" role="alert">{{ message }}</div>{% endfor %}{% endwith %}

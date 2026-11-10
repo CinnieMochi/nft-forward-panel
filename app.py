@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import json
 import math
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, tzinfo
 from functools import wraps
@@ -64,6 +70,13 @@ _connection_cache: tuple[float, dict[str, object]] = (
     {"ports": {}, "tcp_ports": {}, "udp_ports": {}},
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+
+PANEL_VERSION = "1.2.1"
+UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
+UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
+LATEST_RELEASE_TTL = 900.0
+_latest_release_lock = threading.Lock()
+_latest_release_cache: tuple[float, dict[str, Any]] = (0.0, {})
 
 
 class ApplyLock:
@@ -728,7 +741,7 @@ def admin_required(view: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def page_context(**extra: Any) -> dict[str, Any]:
-    return {"user": current_user(), "csrf_token": csrf_token(), **extra}
+    return {"user": current_user(), "csrf_token": csrf_token(), "panel_version": PANEL_VERSION, **extra}
 
 
 def _rate_limit_remaining(remote_addr: str) -> int:
@@ -920,6 +933,122 @@ def cached_probe(address: str, port: int) -> dict[str, Any]:
         return cached[1] if cached else {"reachable": False, "latency_ms": None}
 
 
+def _version_key(value: str) -> tuple[int, ...]:
+    """Turn "v1.2.10" into a comparable tuple, ignoring any suffix."""
+    return tuple(int(part) for part in re.findall(r"\d+", value or "")) or (0,)
+
+
+def fetch_latest_release(force: bool = False) -> dict[str, Any]:
+    """Return the newest published release, cached for LATEST_RELEASE_TTL.
+
+    Failures are cached too: the background thread must not hammer the GitHub
+    API every two seconds while the network is down.
+    """
+    global _latest_release_cache
+    sampled = time.monotonic()
+    with _latest_release_lock:
+        cached_at, cached = _latest_release_cache
+        if not force and cached_at and sampled - cached_at < LATEST_RELEASE_TTL:
+            return dict(cached)
+    payload: dict[str, Any] = {}
+    request_obj = urllib.request.Request(
+        f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"nft-forward-panel/{PANEL_VERSION}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=8) as response:
+            payload = json.loads(response.read(200_000).decode("utf-8", "replace"))
+    except (urllib.error.URLError, ValueError, OSError):
+        payload = {}
+    tag = str(payload.get("tag_name") or "").strip().lstrip("v")
+    result: dict[str, Any] = {}
+    if tag:
+        assets = {str(item.get("name")): str(item.get("digest") or "") for item in payload.get("assets") or []}
+        result = {
+            "tag": tag,
+            "html_url": str(payload.get("html_url") or ""),
+            "published_at": str(payload.get("published_at") or ""),
+            "digest": assets.get(UPDATE_ARCHIVE_NAME, ""),
+        }
+    with _latest_release_lock:
+        _latest_release_cache = (sampled, result)
+    return dict(result)
+
+
+def latest_release_cached() -> dict[str, Any]:
+    with _latest_release_lock:
+        return dict(_latest_release_cache[1])
+
+
+def update_status_path(app: Flask) -> Path:
+    return Path(app.config["DATA_DIR"]) / "update.status"
+
+
+def read_update_status(app: Flask) -> dict[str, Any]:
+    try:
+        payload = json.loads(update_status_path(app).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"phase": "idle", "message": "", "at": ""}
+    return payload if isinstance(payload, dict) else {"phase": "idle", "message": "", "at": ""}
+
+
+UPDATE_ACTIVE_PHASES = {"queued", "checking", "downloading", "installing", "restarting"}
+
+
+def launch_self_update(app: Flask, tag: str | None) -> tuple[bool, str]:
+    """Start deploy/self-update.sh as a transient systemd unit.
+
+    It has to be detached: the script restarts this very service, so a child
+    process owned by the web worker would be killed mid-update.
+    """
+    script = Path(__file__).resolve().parent / "deploy" / "self-update.sh"
+    if not script.is_file():
+        return False, "更新脚本 deploy/self-update.sh 不存在，请用安装器手动升级。"
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return False, "面板必须以 root 身份运行才能自我更新。"
+    if not shutil.which("systemd-run"):
+        return False, "系统缺少 systemd-run，请用安装器手动升级。"
+    if read_update_status(app).get("phase") in UPDATE_ACTIVE_PHASES:
+        return False, "已有更新任务正在进行，请稍候。"
+    data_dir = Path(app.config["DATA_DIR"])
+    with ApplyLock(data_dir):
+        runner = Path(tempfile.mkstemp(prefix="nfp-selfupdate-", suffix=".sh")[1])
+        try:
+            shutil.copy2(script, runner)
+            os.chmod(runner, 0o700)
+            update_status_path(app).write_text(
+                json.dumps({"phase": "queued", "message": "已排队，正在启动更新", "at": now()}),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return False, f"无法准备更新任务：{exc}"
+    command = [
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        f"--unit=nfp-selfupdate-{int(time.time())}-{secrets.token_hex(2)}",
+        "--property=Type=oneshot",
+        "/bin/bash",
+        str(runner),
+    ]
+    if tag:
+        command.append(tag)
+    try:
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        return False, f"无法启动更新任务：{exc}"
+    return True, "更新任务已启动，面板将在完成后自动重启。"
+
+
 def refresh_live_observability(app: Flask) -> None:
     """Refresh conntrack and unchanged TCP latency probes outside web requests."""
     global _connection_cache
@@ -1108,6 +1237,10 @@ def start_policy_scheduler(app: Flask) -> None:
                 observe(app)
             except Exception:
                 app.logger.exception("Live connection and latency refresh failed")
+            try:
+                fetch_latest_release()
+            except Exception:
+                app.logger.exception("Release lookup failed")
             time.sleep(max(0.1, LIVE_CACHE_SECONDS - (time.monotonic() - started)))
 
     threading.Thread(target=worker, name="nfp-policy-scheduler", daemon=True).start()
@@ -1170,6 +1303,50 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         reveals nothing beyond "the WSGI app answered".
         """
         return jsonify({"status": "ok"})
+
+    @app.get("/api/version")
+    @login_required
+    def version_api() -> Any:
+        latest = (
+            fetch_latest_release(force=True)
+            if request.args.get("refresh") == "1"
+            else latest_release_cached()
+        )
+        latest_tag = str(latest.get("tag") or "")
+        return jsonify(
+            {
+                "current": PANEL_VERSION,
+                "latest": latest_tag or PANEL_VERSION,
+                "latest_known": bool(latest_tag),
+                "update_available": bool(latest_tag) and _version_key(latest_tag) > _version_key(PANEL_VERSION),
+                "release_url": str(latest.get("html_url") or ""),
+                "published_at": str(latest.get("published_at") or ""),
+                "publisher": UPDATE_REPO,
+                "can_update": current_user()["role"] == "admin",
+                "status": read_update_status(app),
+            }
+        )
+
+    @app.get("/api/update-status")
+    @login_required
+    def update_status_api() -> Any:
+        return jsonify(read_update_status(app))
+
+    @app.post("/api/update")
+    @admin_required
+    def start_update() -> Any:
+        require_csrf()
+        tag = (request.form.get("tag") or "").strip()
+        if tag and not re.fullmatch(r"v?\d+\.\d+\.\d+", tag):
+            return jsonify({"ok": False, "message": "版本号格式不正确。"}), 400
+        started, message = launch_self_update(app, tag or None)
+        add_audit(
+            "panel_update",
+            tag or "latest",
+            f"self-update {'started' if started else 'rejected'}: {message}",
+        )
+        get_db().commit()
+        return jsonify({"ok": started, "message": message}), 202 if started else 409
 
     @app.get("/")
     @login_required
@@ -1756,6 +1933,65 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             flash("密码已重置。", "success")
         except ValueError as exc:
             flash(str(exc), "error")
+        return redirect(url_for("users"))
+
+    @app.post("/users/<int:user_id>/profile")
+    @admin_required
+    def edit_user_profile(user_id: int) -> Any:
+        require_csrf()
+        try:
+            username = validate_username(request.form.get("username", ""))
+            email = validate_email(request.form.get("email", ""))
+            connection = get_db()
+            target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if target is None:
+                raise ValueError("账户不存在。")
+            if account_identifier_conflicts(connection, username, email, excluded_id=user_id):
+                raise ValueError("用户名或邮箱与现有账户标识冲突。")
+            connection.execute("UPDATE users SET username = ?, email = ? WHERE id = ?", (username, email, user_id))
+            add_audit(
+                "user_profile",
+                target["identity_id"],
+                f"from={target['username']}/{target['email'] or '(unset)'}; "
+                f"to={username}/{email or '(unset)'}; internal_id={user_id}",
+            )
+            connection.commit()
+            flash("账户资料已更新。", "success")
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            flash("用户名或邮箱已存在。" if isinstance(exc, sqlite3.IntegrityError) else str(exc), "error")
+        return redirect(url_for("users"))
+
+    @app.post("/users/<int:user_id>/delete")
+    @admin_required
+    def delete_user(user_id: int) -> Any:
+        require_csrf()
+        actor = current_user()
+        connection = get_db()
+        target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if target is None:
+            flash("账户不存在。", "error")
+        elif int(target["id"]) == int(actor["id"]):
+            flash("不能删除自己的账户。", "error")
+        elif target["role"] == "admin" and connection.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND id != ?",
+            (user_id,),
+        ).fetchone()[0] == 0:
+            flash("至少需要保留一个启用的管理员。", "error")
+        else:
+            owned = connection.execute(
+                "SELECT COUNT(*) FROM forward_rules WHERE owner_id = ?", (user_id,)
+            ).fetchone()[0]
+            if owned:
+                flash(f"该账户仍拥有 {owned} 条转发规则，请先删除或转移后再删除账户。", "error")
+            else:
+                with ApplyLock(Path(app.config["DATA_DIR"])):
+                    # Audit history is kept; only the actor link is dropped so the
+                    # foreign key does not block removing the account.
+                    connection.execute("UPDATE audit_events SET actor_id = NULL WHERE actor_id = ?", (user_id,))
+                    connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                    add_audit("user_delete", target["identity_id"], f"username={target['username']}; internal_id={user_id}")
+                    connection.commit()
+                flash("账户及其历史流量记录已删除。", "success")
         return redirect(url_for("users"))
 
     def visible_rules(connection: sqlite3.Connection, user: sqlite3.Row) -> list[sqlite3.Row]:

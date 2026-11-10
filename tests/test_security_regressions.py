@@ -1132,6 +1132,146 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertFalse(close_firewall.call_args.kwargs["remove_listen_port"])
         self.assertEqual(close_firewall.call_args.args[0].listen_port, 10130)
 
+    def test_version_api_reports_available_update(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        release = {"tag": "99.0.0", "html_url": "https://example.test/r", "published_at": "", "digest": "sha256:" + "0" * 64}
+        with patch("app.latest_release_cached", return_value=release):
+            payload = admin.get("/api/version").get_json()
+        self.assertRegex(payload["current"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(payload["latest"], "99.0.0")
+        self.assertTrue(payload["update_available"])
+        self.assertTrue(payload["can_update"])
+        self.assertEqual(payload["release_url"], "https://example.test/r")
+
+    def test_version_api_hides_update_button_from_plain_users(self):
+        member = self.web.test_client()
+        self.login(member, "member", "MemberPass!2026")
+        with patch("app.latest_release_cached", return_value={"tag": "99.0.0"}):
+            payload = member.get("/api/version").get_json()
+        self.assertFalse(payload["can_update"])
+
+    def test_version_api_survives_a_failed_lookup(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        with patch("app.latest_release_cached", return_value={}):
+            payload = admin.get("/api/version").get_json()
+        self.assertTrue(payload["current"])
+        self.assertFalse(payload["latest_known"])
+        self.assertFalse(payload["update_available"])
+
+    def test_admin_can_edit_another_account_profile(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member = connection.execute("SELECT * FROM users WHERE username='member'").fetchone()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        response = admin.post(
+            f"/users/{member[0]}/profile",
+            data={"csrf_token": token, "username": "renamed", "email": "renamed@example.com"},
+        )
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            row = connection.execute(
+                "SELECT username, email, identity_id FROM users WHERE id=?", (member[0],)
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], "renamed")
+        self.assertEqual(row[1], "renamed@example.com")
+        self.assertEqual(row[2], member[1])
+
+    def test_profile_edit_rejects_duplicate_username(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        admin.post(
+            f"/users/{member_id}/profile",
+            data={"csrf_token": token, "username": "admin", "email": "other@example.com"},
+        )
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            name = connection.execute("SELECT username FROM users WHERE id=?", (member_id,)).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(name, "member")
+
+    def test_delete_account_keeps_audit_rows(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member = connection.execute("SELECT * FROM users WHERE username='member'").fetchone()
+            connection.execute(
+                "INSERT INTO audit_events (actor_id, action, target, details, remote_addr, created_at) "
+                "VALUES (?, 'member_action', 'x', '', '127.0.0.1', ?)",
+                (member[0], now()),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        response = admin.post(f"/users/{member[0]}/delete", data={"csrf_token": token})
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            self.assertIsNone(connection.execute("SELECT id FROM users WHERE id=?", (member[0],)).fetchone())
+            kept = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE action='member_action' AND actor_id IS NULL"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(kept, 1)
+
+    def test_delete_account_refuses_when_rules_remain(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, created_at) "
+                "VALUES (10999, '8.8.8.8', 443, ?, '2026-01-01 00:00:00 UTC')",
+                (member_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        admin.post(f"/users/{member_id}/delete", data={"csrf_token": token})
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            still_there = connection.execute("SELECT id FROM users WHERE id=?", (member_id,)).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(still_there)
+
+    def test_delete_account_refuses_self_and_last_admin(self):
+        admin_client = self.web.test_client()
+        self.login(admin_client, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            admin_id = connection.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+        finally:
+            connection.close()
+        token = csrf_token(admin_client.get("/users"))
+        admin_client.post(f"/users/{admin_id}/delete", data={"csrf_token": token})
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            still_there = connection.execute("SELECT id FROM users WHERE id=?", (admin_id,)).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(still_there)
+
 
 if __name__ == "__main__":
     unittest.main()

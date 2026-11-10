@@ -46,8 +46,8 @@ git push origin main
 ## 3. 发布一个版本
 
 ```bash
-git tag -a v1.2.0 -m "v1.2.0"
-git push origin v1.2.0
+git tag -a v1.2.1 -m "v1.2.1"
+git push origin v1.2.1
 ```
 
 ### CI 会依次做什么
@@ -74,12 +74,59 @@ gh run view <run-id> --repo CinnieMochi/nft-forward-panel --log-failed
 
 ---
 
-## 4. 应急：手工补发一个 Release
+## 4. 已部署实例的原地升级（推荐）
+
+已经跑起来的机器不要用安装器整机重装：`install.sh` 会重跑 `apt-get`、重写 `/etc/nft-forward-panel.env`、重写 Caddy 片段。只想换程序时用下面的流程，**只动 `/opt`**，不碰数据库、env、Caddy、nftables，中断 2–4 秒，转发不受影响。
+
+```bash
+TS=$(date +%Y%m%d-%H%M%S)
+TAG=v1.2.1   # 必须是已有的 Release 标签
+
+# 1) 备份：数据库一致性快照 + 程序目录
+sqlite3 /var/lib/nft-forward-panel/panel.db ".backup '/root/nfp-$TS.db'"
+cp -a /opt/nft-forward-panel /opt/nft-forward-panel.backup-$TS
+
+# 2) 下载并校验（摘要取自 release API 的 assets[].digest）
+curl -fsSL -o /tmp/nfp.tar.gz \
+  "https://github.com/CinnieMochi/nft-forward-panel/releases/download/$TAG/nft-forward-panel.tar.gz"
+sha256sum /tmp/nfp.tar.gz   # 必须与 API 返回的摘要一致
+mkdir -p /tmp/nfp-new && tar -xzf /tmp/nfp.tar.gz -C /tmp/nfp-new
+
+# 3) 覆盖程序文件，保留 .venv
+( cd /tmp/nfp-new/nft-forward-panel && tar -cf - --exclude=.venv . ) \
+  | ( cd /opt/nft-forward-panel && tar -xf - )
+
+# 4) 补齐依赖并重启
+/opt/nft-forward-panel/.venv/bin/pip install -q -r /opt/nft-forward-panel/requirements.txt
+/opt/nft-forward-panel/.venv/bin/pip check
+systemctl restart nft-forward-panel
+
+# 5) 验收
+curl -fsS http://127.0.0.1:8108/healthz
+systemctl is-active nft-forward-panel
+```
+
+**关键坑**：不要先在别的路径建 venv 再整体改名——`venv/bin/*` 的 shebang 写死了绝对路径，改名后 `systemctl start` 会 `status=203/EXEC`。要么在最终路径建 venv，要么像上面这样复用已有 `.venv`。
+
+回滚（数据库没动过，所以不需要恢复 DB）：
+
+```bash
+systemctl stop nft-forward-panel
+mv /opt/nft-forward-panel /opt/nfp-failed-$TS
+mv /opt/nft-forward-panel.backup-$TS /opt/nft-forward-panel
+systemctl start nft-forward-panel
+```
+
+> 从 v1.2.1 起也可以在面板左下角点版本号 → 「立即更新」完成同样的流程（自动备份、摘要校验、健康检查失败自动回滚）。
+
+---
+
+## 5. 应急：手工补发一个 Release
 
 只有当 CI 环境本身不可用、又必须发出某个已打标签的版本时才这么做。产物必须来自**同一个标签对应的提交**，不能拿工作区里的半成品打包。
 
 ```bash
-git checkout v1.2.0
+git checkout v1.2.1
 mkdir -p /tmp/nfp-dist/nft-forward-panel
 rsync -a ./ /tmp/nfp-dist/nft-forward-panel/ \
   --exclude .git --exclude .github --exclude dist --exclude .venv \
@@ -88,7 +135,7 @@ tar -C /tmp/nfp-dist -czf /tmp/nfp-dist/nft-forward-panel.tar.gz nft-forward-pan
 cd /tmp/nfp-dist
 sha256sum nft-forward-panel.tar.gz > nft-forward-panel.tar.gz.sha256
 
-gh release create v1.2.0 --repo CinnieMochi/nft-forward-panel --verify-tag \
+gh release create v1.2.1 --repo CinnieMochi/nft-forward-panel --verify-tag \
   --generate-notes nft-forward-panel.tar.gz nft-forward-panel.tar.gz.sha256
 ```
 
@@ -96,7 +143,7 @@ gh release create v1.2.0 --repo CinnieMochi/nft-forward-panel --verify-tag \
 
 ---
 
-## 5. 验收一个 Release
+## 6. 验收一个 Release
 
 ```bash
 # 最新 Release 应该是你要的版本
@@ -118,7 +165,7 @@ tar -tzf /tmp/nfp.tar.gz | head
 
 ---
 
-## 6. 注意事项
+## 7. 注意事项
 
 - **不要**用 `curl | bash` 安装。先把 `install.sh` 下载下来看一眼，再以 root 执行。
 - **不要**把 `/etc/nft-forward-panel.env`、生产数据库、头像或备份提交进仓库。

@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.0/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.0/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.0/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.0
+sudo bash /tmp/nfp-install.sh --version v1.2.1
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -130,6 +130,7 @@ server {
 | `PANEL_LOGIN_WINDOW_SECONDS` | `600` | 登录限流窗口 |
 | `PANEL_LOGIN_MAX_ATTEMPTS` | `20` | 窗口内允许的失败次数 |
 | `PANEL_TIMEZONE` | `Asia/Shanghai` | 月流量周期与日期显示所用时区（IANA 名称） |
+| `PANEL_UPDATE_REPO` | `CinnieMochi/nft-forward-panel` | 在线更新时拉取 Release 的仓库，改动后只接受该仓库发布且摘要匹配的包 |
 
 ---
 
@@ -161,6 +162,30 @@ server {
 
 ---
 
+## 版本信息与在线更新
+
+左下角的「控制台运行中」右侧显示**当前版本号**，点一下可以：
+
+- 看到**当前版本**和 GitHub 上的**最新版本**（只有一个发布渠道，不区分稳定/开发版）
+- 点「检查最新版」实时查询（服务端向 GitHub Releases API 查询，结果缓存 15 分钟）
+- **管理员**在有新版本时可以直接点「立即更新」
+
+在线更新的实现和边界：
+
+1. 只从 `PANEL_UPDATE_REPO`（默认本仓库）的 **Release** 取包，不接受任意 URL。
+2. 下载后必须与 GitHub 报告的 asset **SHA-256 摘要**一致，否则中止。
+3. 由 `deploy/self-update.sh` 以独立 systemd 临时单元（`systemd-run`）执行——面板重启不会杀掉更新进程。
+4. 更新前把当前 `/opt/nft-forward-panel` 整目录备份为 `.backup-<时间戳>`（只保留最近两份），然后覆盖程序文件、补齐 venv 依赖、重启。
+5. **健康检查不通过会自动回滚**旧版本并重启，状态写入 `/var/lib/nft-forward-panel/update.status`，前端实时显示进度。
+6. 数据库不在覆盖范围内，升级不会改动你的账号、规则与流量记录。
+
+> 只有管理员能触发；每次触发都会写审计（`panel_update`）。如果服务器出不了网，用安装器或 SSH 手动升级。
+
+## 界面小工具
+
+- **隐藏端口与目标地址**：概览页「入口地址」右侧的 ◉ 按钮，一键把规则表的**监听端口**和**目标地址**替换成占位符，再点恢复；状态记在浏览器本地，刷新后保持。
+- **用户管理**：管理员在「用户与策略」可以对账户执行**编辑**（用户名 / 邮箱，身份 ID 不可改）和**删除**。删除会一并清掉该账户的历史流量记录；若它仍拥有转发规则，会要求先删除或转移规则；审计日志保留（只解绑操作者）。不能删除自己，也不会删掉最后一个启用的管理员。
+
 ## SSH 备用管理（nfpctl）
 
 WebUI 或反代挂掉时，用同一套后端继续管理。需要 root，读 `/etc/nft-forward-panel.env` 的路径配置，与 WebUI **共用数据库、审计、校验、渲染、文件锁和回滚**。
@@ -185,13 +210,14 @@ sudo nfpctl menu        # 交互式菜单
 ```mermaid
 flowchart LR
   B[浏览器] -->|HTTPS| R[Caddy / Nginx]
-  R --> W[Flask + Gunicorn<br/>127.0.0.1:8108]
-  W --> A[(SQLite panel.db)]
-  S[SSH: nfpctl / nft.sh] --> A
-  W -->|参数化命令| N[nftables / sysctl / firewalld·ufw·iptables]
+  R --> W["Flask + Gunicorn<br/>127.0.0.1:8108"]
+  W --> A[("SQLite panel.db")]
+  S["SSH: nfpctl / nft.sh"] --> A
+  W -->|参数化命令| N["nftables / sysctl / firewalld · ufw · iptables"]
   S -->|参数化命令| N
-  N --> C[/etc/nftables.d/port-forward.conf]
-  W -.-> T1[对账线程 2s] & T2[可观测线程 2s]
+  N --> C["/etc/nftables.d/port-forward.conf"]
+  W -.-> T1["对账线程 2s"]
+  W -.-> T2["可观测线程 2s"]
 ```
 
 两个后台守护线程：
@@ -237,8 +263,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.0 -m "v1.2.0"
-git push origin v1.2.0
+git tag -a v1.2.1 -m "v1.2.1"
+git push origin v1.2.1
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -280,6 +306,14 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.2.1
+
+- 新增：左下角显示当前版本号，点开可查看**最新版本**并由管理员**一键在线更新**（摘要校验 + 自动回滚 + 审计）。
+- 新增：概览页可一键**隐藏/显示监听端口与目标地址**，适合录屏或截图时脱敏。
+- 新增：用户管理支持**编辑账户资料**（用户名 / 邮箱）与**删除账户**，含自我保护与最后管理员保护。
+- 修复：README 里的 mermaid 架构图在 GitHub 上无法渲染（未加引号的标签与 `&` 连线语法）。
+- 依赖：新增 `deploy/self-update.sh`，安装器与发布包都会带上它。
 
 ### v1.2.0
 
