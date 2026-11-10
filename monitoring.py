@@ -14,6 +14,18 @@ from nft_manager import NftManager
 SAMPLE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f UTC"
 LEGACY_SAMPLE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
 MIN_SAMPLE_INTERVAL_SECONDS = 0.75
+BUCKET_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+TRAFFIC_RETENTION_DAYS = 60
+
+
+def prune_traffic_buckets(connection: sqlite3.Connection, now_dt: datetime | None = None) -> int:
+    """Drop buckets older than the retention window.
+
+    Kept out of TrafficMonitor.sample() so it also runs on a panel that has no
+    forwarding rules at all.
+    """
+    cutoff = ((now_dt or utc_now()) - timedelta(days=TRAFFIC_RETENTION_DAYS)).strftime(BUCKET_TIME_FORMAT)
+    return connection.execute("DELETE FROM traffic_buckets WHERE bucket_at < ?", (cutoff,)).rowcount
 
 
 def utc_now() -> datetime:
@@ -196,7 +208,5 @@ class TrafficMonitor:
                 "rx_bps": rx_bps,
                 "tx_bps": tx_bps,
             }
-        cutoff = (now_dt - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S UTC")
-        connection.execute("DELETE FROM traffic_buckets WHERE bucket_at < ?", (cutoff,))
         connection.commit()
         return result

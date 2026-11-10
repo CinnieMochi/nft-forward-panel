@@ -33,7 +33,7 @@ from flask import Flask, abort, current_app, flash, g, jsonify, redirect, render
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from monitoring import TrafficMonitor, probe_tcp, reset_counter_baselines
+from monitoring import TrafficMonitor, probe_tcp, prune_traffic_buckets, reset_counter_baselines
 from nft_manager import ForwardRule, NftManager, NftOperationError
 
 
@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.2.8"
+PANEL_VERSION = "1.2.9"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0
@@ -217,12 +217,12 @@ def validate_email(value: str) -> str:
     return value
 
 
-def validate_rule_note(value: str) -> str:
+def validate_rule_note(value: str, label: str = "规则备注") -> str:
     value = value.strip()
     if len(value) > 80:
-        raise ValueError("规则备注最多 80 个字符。")
+        raise ValueError(f"{label}最多 80 个字符。")
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ValueError("规则备注不能包含换行或控制字符。")
+        raise ValueError(f"{label}不能包含换行或控制字符。")
     return value
 
 
@@ -691,6 +691,9 @@ def init_schema(app: Flask) -> None:
                 "INSERT INTO audit_events (actor_id, action, target, details, remote_addr, created_at) VALUES (?, 'bootstrap', ?, ?, '', ?)",
                 (admin_id, identity_id, f"首次管理员账户已创建; username={username}", now()),
             )
+        pruned = prune_expired_packages(connection)
+        if pruned:
+            app.logger.info("Pruned %s expired traffic packages", pruned)
         connection.commit()
     finally:
         connection.close()
@@ -811,6 +814,12 @@ def monthly_cycle_end(user: sqlite3.Row | dict[str, Any], at: datetime | None = 
     """Return the instant this billing cycle ends (the next reset boundary)."""
     start = monthly_cycle_start(user, at)
     return monthly_cycle_start(user, start + timedelta(days=32))
+
+
+def prune_expired_packages(connection: sqlite3.Connection, days: int = 120) -> int:
+    """Drop packages whose cycle ended long ago; they can never be billed again."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(UTC_TIME_FORMAT)
+    return connection.execute("DELETE FROM traffic_packages WHERE expires_at < ?", (cutoff,)).rowcount
 
 
 def human_bytes(value: int) -> str:
@@ -1078,6 +1087,15 @@ def read_update_status(app: Flask) -> dict[str, Any]:
 
 
 UPDATE_ACTIVE_PHASES = {"queued", "checking", "downloading", "installing", "restarting"}
+UPDATE_STATUS_STALE_SECONDS = 600
+
+
+def update_status_is_stale(status: dict[str, Any]) -> bool:
+    """An interrupted update leaves its phase behind; do not block forever."""
+    stamp = parse_utc(status.get("at"))
+    if stamp is None:
+        return True
+    return (datetime.now(timezone.utc) - stamp).total_seconds() > UPDATE_STATUS_STALE_SECONDS
 
 
 def launch_self_update(app: Flask, tag: str | None) -> tuple[bool, str]:
@@ -1093,7 +1111,8 @@ def launch_self_update(app: Flask, tag: str | None) -> tuple[bool, str]:
         return False, "面板必须以 root 身份运行才能自我更新。"
     if not shutil.which("systemd-run"):
         return False, "系统缺少 systemd-run，请用安装器手动升级。"
-    if read_update_status(app).get("phase") in UPDATE_ACTIVE_PHASES:
+    current = read_update_status(app)
+    if current.get("phase") in UPDATE_ACTIVE_PHASES and not update_status_is_stale(current):
         return False, "已有更新任务正在进行，请稍候。"
     data_dir = Path(app.config["DATA_DIR"])
     with ApplyLock(data_dir):
@@ -1174,6 +1193,7 @@ def reconcile_rule_state(app: Flask, at: datetime | None = None, force_apply: bo
             manager = NftManager(app.config["FORWARD_CONFIG"], app.config["MAIN_CONFIG"], app.config["SYSCTL_CONFIG"])
             previously_enabled = [row_to_rule(row) for row in rows if not row["paused_reason"]]
             retried_firewall = process_firewall_retries(connection, manager, previously_enabled)
+            prune_traffic_buckets(connection)
             if not rows:
                 connection.commit()
                 return retried_firewall
@@ -1424,6 +1444,16 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         tag = (request.form.get("tag") or "").strip()
         if tag and not re.fullmatch(r"v?\d+\.\d+\.\d+", tag):
             return jsonify({"ok": False, "message": "版本号格式不正确。"}), 400
+        if tag and _version_key(tag) <= _version_key(PANEL_VERSION):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "message": f"目标版本 {tag} 不高于当前 v{PANEL_VERSION}，已拒绝；如需回滚请通过 SSH 手动处理。",
+                    }
+                ),
+                409,
+            )
         started, message = launch_self_update(app, tag or None)
         add_audit(
             "panel_update",
@@ -2099,7 +2129,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         require_csrf()
         try:
             size_gib = parse_bounded_float(request.form.get("size_gib"), "流量包大小", 0.01, 1048576)
-            note = (request.form.get("note") or "").strip()[:80]
+            note = validate_rule_note(request.form.get("note", ""), "流量包备注")
             connection = get_db()
             target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if target is None:

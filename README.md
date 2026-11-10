@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.8/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.8/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.8/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.8
+sudo bash /tmp/nfp-install.sh --version v1.2.9
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -278,8 +278,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.8 -m "v1.2.8"
-git push origin v1.2.8
+git tag -a v1.2.9 -m "v1.2.9"
+git push origin v1.2.9
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -321,6 +321,18 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.2.9（安全与健壮性修复，建议所有部署升级）
+
+- **修复（重要）**：在线更新后程序文件属主继承发布包里的 CI uid，而面板以 root 运行 → 本机一旦出现同 uid 账号就可能改写程序取得 root。现在升级覆盖后与备份目录都会 `chown -R root:root`。
+- 修复：更新状态加 10 分钟陈旧判定。此前更新中途断电/被杀会把状态留在 `installing`/`restarting`，之后永久提示「已有更新任务正在进行」，只能手工改文件。
+- 修复：拒绝把面板"更新"到**不高于当前**的版本（此前可退回任意旧版本）。
+- 修复：流量桶 60 天清理移出采样热路径，零转发规则的面板也会按时清理。
+- 修复：过期流量包在启动时清理（120 天），不再无限累积。
+- 修复：流量包备注复用规则备注校验（≤80 字符、拒绝换行与控制字符），不再允许塞多行。
+- 加固：在线更新不再 `source` 由发布 API 生成的 shell 片段，改为读取固定字段，并校验下载地址必须属于 `github.com`。
+- 改进：更新时若 systemd unit 有新版本，写入 `.service.new` 并给出提示，**不自动覆盖**（避免冲掉你的本地改动）。
+- 测试：70 个（新增 4 个：陈旧状态判定、降级拒绝、忙碌拒绝、升级脚本不变量）。
 
 ### v1.2.8
 

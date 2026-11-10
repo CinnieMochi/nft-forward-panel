@@ -58,7 +58,7 @@ fi
 
 curl -fsSL --retry 3 -m 30 -o "$WORK/release.json" "$API" || fail "无法读取发布信息"
 
-python3 - "$WORK/release.json" "$WORK/meta" <<'PY' || fail "发布信息解析失败"
+mapfile -t META < <(python3 - "$WORK/release.json" <<'PY'
 import json
 import sys
 
@@ -67,18 +67,20 @@ tag = str(payload.get("tag_name") or "").lstrip("v")
 assets = {item.get("name"): item for item in payload.get("assets") or []}
 archive = assets.get("nft-forward-panel.tar.gz")
 if not tag or not archive:
-    raise SystemExit("missing tag or archive asset")
-lines = [
-    f"TAG={tag}",
-    f"URL={archive['browser_download_url']}",
-    f"DIGEST={archive.get('digest') or ''}",
-]
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")
+    raise SystemExit(1)
+print(tag)
+print(archive["browser_download_url"])
+print(archive.get("digest") or "")
 PY
-
-# shellcheck disable=SC1090
-. "$WORK/meta"
-[ -n "${TAG:-}" ] || fail "无法确定目标版本"
+)
+TAG="${META[0]:-}"
+URL="${META[1]:-}"
+DIGEST="${META[2]:-}"
+[ -n "$TAG" ] && [ -n "$URL" ] || fail "无法确定目标版本"
+case "$URL" in
+    https://github.com/*) ;;
+    *) fail "下载地址不来自 github.com，拒绝执行" ;;
+esac
 
 write_status downloading "正在下载 v${TAG}"
 curl -fsSL --retry 3 -m 180 -o "$WORK/package.tar.gz" "$URL" || fail "下载失败"
@@ -98,6 +100,9 @@ SOURCE="$WORK/pkg/nft-forward-panel"
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 BACKUP="${INSTALL_DIR}.backup-${TIMESTAMP}"
 cp -a "$INSTALL_DIR" "$BACKUP" || fail "备份当前版本失败"
+# A rollback restores this tree, so it must be root-owned as well; otherwise the
+# next update reintroduces a directory owned by a foreign uid.
+chown -R root:root "$BACKUP" 2>/dev/null || true
 { ls -1d "${INSTALL_DIR}".backup-* 2>/dev/null | sort -r | tail -n +3 | xargs -r rm -rf; } || true
 
 restore() {
@@ -111,7 +116,20 @@ restore() {
 
 ( cd "$SOURCE" && tar -cf - --exclude=.venv . ) | ( cd "$INSTALL_DIR" && tar -xf - ) \
     || restore "写入新版本文件失败"
+# The archive carries the CI runner's numeric uid/gid. The panel runs as root, so
+# a foreign-owned install directory would let that uid rewrite the code.
+chown -R root:root "$INSTALL_DIR" 2>/dev/null || true
 chmod 0755 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/nft.sh" "$INSTALL_DIR/nfpctl.py" 2>/dev/null || true
+
+UNIT_TARGET="/etc/systemd/system/${APP_NAME}.service"
+UNIT_SOURCE="$INSTALL_DIR/deploy/${APP_NAME}.service"
+UNIT_NOTE=""
+if [ -f "$UNIT_SOURCE" ] && ! cmp -s "$UNIT_SOURCE" "$UNIT_TARGET" 2>/dev/null; then
+    # Never replace the live unit automatically: it may carry local edits.
+    if cp -f "$UNIT_SOURCE" "${UNIT_TARGET}.new" 2>/dev/null; then
+        UNIT_NOTE="；unit 有新版，已写入 ${UNIT_TARGET}.new，请人工确认后替换"
+    fi
+fi
 
 PIP="$INSTALL_DIR/.venv/bin/pip"
 if [ -x "$PIP" ]; then
@@ -125,7 +143,7 @@ systemctl restart "$APP_NAME" || restore "重启服务失败"
 
 for _ in $(seq 1 40); do
     if systemctl is-active --quiet "$APP_NAME" && curl -fsS -m 3 "$HEALTH_URL" >/dev/null 2>&1; then
-        write_status done "已更新到 v${TAG}"
+        write_status done "已更新到 v${TAG}${UNIT_NOTE}"
         exit 0
     fi
     sleep 1

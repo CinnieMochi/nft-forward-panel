@@ -1461,5 +1461,48 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(left, 0)
 
 
+    def test_update_status_staleness_is_detected(self):
+        from app import update_status_is_stale
+
+        self.assertTrue(update_status_is_stale({"phase": "installing", "at": "2020-01-01 00:00:00 UTC"}))
+        self.assertFalse(update_status_is_stale({"phase": "installing", "at": now()}))
+        # an unparsable stamp must not wedge the updater forever
+        self.assertTrue(update_status_is_stale({"phase": "installing"}))
+
+    def test_api_update_refuses_an_older_version(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        token = csrf_token(admin.get("/users"))
+        with patch("app.launch_self_update") as launch:
+            response = admin.post("/api/update", data={"csrf_token": token, "tag": "v1.0.0"})
+        self.assertEqual(response.status_code, 409)
+        launch.assert_not_called()
+
+    def test_launch_self_update_blocks_on_a_fresh_status(self):
+        import app as app_module
+        from app import launch_self_update
+
+        status_path = Path(self.web.config["DATA_DIR"]) / "update.status"
+        status_path.write_text(
+            '{"phase":"installing","message":"busy","at":"' + now() + '"}', encoding="utf-8"
+        )
+        with patch.object(app_module.os, "geteuid", lambda: 0, create=True), \
+                patch("app.shutil.which", return_value="/usr/bin/systemd-run"), \
+                patch("app.subprocess.Popen") as popen:
+            started, message = launch_self_update(self.web, "v9.9.9")
+        self.assertFalse(started)
+        self.assertIn("正在进行", message)
+        popen.assert_not_called()
+
+    def test_self_update_script_keeps_ownership_and_avoids_source(self):
+        script = Path(__file__).resolve().parent.parent / "deploy" / "self-update.sh"
+        text = script.read_text(encoding="utf-8")
+        # P1: the archive carries the CI runner's uid, so the script must root-chown
+        self.assertIn("chown -R root:root", text)
+        # P7: never source shell generated from the release API response
+        self.assertNotIn('. "$WORK/meta"', text)
+        self.assertIn('case "$URL" in', text)
+
+
 if __name__ == "__main__":
     unittest.main()
