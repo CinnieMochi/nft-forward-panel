@@ -28,6 +28,7 @@ ADMIN_USERNAME="admin"
 ADMIN_PASSWORD="${NFP_ADMIN_PASSWORD:-}"
 REPOSITORY="${NFP_REPOSITORY:-$DEFAULT_REPOSITORY}"
 RELEASE_VERSION="latest"
+LANG_EXPLICIT=0
 NON_INTERACTIVE=0
 ASSUME_YES=0
 PURGE_DATA=0
@@ -233,6 +234,19 @@ firewall_close_port() {
     fi
 }
 
+ask_language() {
+    # The answer decides the language of everything that follows, so the prompt
+    # itself has to be bilingual.
+    [[ "$LANG_EXPLICIT" -eq 1 ]] && return 0
+    local answer=""
+    read -r -p "选择语言 / Choose language [1=中文 2=English] (默认/默认 1): " answer || answer="1"
+    case "${answer:-1}" in
+        2) LANG_CODE="en" ;;
+        *) LANG_CODE="zh" ;;
+    esac
+    load_messages
+}
+
 # --------------------------------------------------------------------------
 # Library mode: source this file to unit-test the catalog and pure helpers.
 # --------------------------------------------------------------------------
@@ -301,7 +315,7 @@ EOF
 
 while (($#)); do
     case "$1" in
-        --lang) [[ $# -ge 2 ]] || die "--lang requires a value"; LANG_CODE="$2"; shift 2 ;;
+        --lang) [[ $# -ge 2 ]] || die "--lang requires a value"; LANG_CODE="$2"; LANG_EXPLICIT=1; shift 2 ;;
         --access) [[ $# -ge 2 ]] || die "--access requires https|http"; ACCESS_MODE="$2"; shift 2 ;;
         --domain) [[ $# -ge 2 ]] || die "--domain requires a value"; DOMAIN="$2"; shift 2 ;;
         --email) [[ $# -ge 2 ]] || die "--email requires a value"; EMAIL="$2"; shift 2 ;;
@@ -330,6 +344,10 @@ case "${ID:-}" in debian|ubuntu) ;; *) die "$(t need_os)" ;; esac
 command -v apt-get >/dev/null || die "$(t need_apt)"
 
 trap cleanup EXIT
+
+if [[ $NON_INTERACTIVE -eq 0 ]]; then
+    ask_language
+fi
 
 do_uninstall() {
     if [[ ! -d "$INSTALL_DIR" && ! -f "$SERVICE_FILE" ]]; then

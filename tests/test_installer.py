@@ -16,7 +16,17 @@ SCRIPT = ROOT / "install.sh"
 BASH = shutil.which("bash")
 
 
+def clean_env():
+    # Never inherit NFP_INSTALLER_LIB from the caller: the script would stop at
+    # its library guard and every check below would silently see empty output.
+    environment = dict(os.environ)
+    environment.pop("NFP_INSTALLER_LIB", None)
+    return environment
+
+
 def run(args, env=None):
+    if env is None:
+        env = clean_env()
     return subprocess.run(
         args,
         cwd=str(ROOT),
@@ -31,8 +41,29 @@ def run(args, env=None):
     )
 
 
+def run_library_with_stdin(stdin_text, code):
+    environment = clean_env()
+    environment["NFP_INSTALLER_LIB"] = "1"
+    # Feed stdin as bytes: text mode would translate \n to \r\n on Windows and
+    # bash's read would hand the script "2\r" instead of "2".
+    result = subprocess.run(
+        [BASH, "-c", "source ./install.sh\n" + code],
+        cwd=str(ROOT),
+        input=stdin_text.encode("utf-8"),
+        capture_output=True,
+        timeout=120,
+        env=environment,
+    )
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8", "replace"),
+        result.stderr.decode("utf-8", "replace"),
+    )
+
+
 def run_library(code):
-    environment = dict(os.environ)
+    environment = clean_env()
     environment["NFP_INSTALLER_LIB"] = "1"
     return run([BASH, "-c", "source ./install.sh\n" + code], env=environment)
 
@@ -92,6 +123,20 @@ class InstallerTests(unittest.TestCase):
             "pw:123456789012:ok",
         ):
             self.assertIn(expected, out)
+
+
+    def test_language_question_selects_the_following_language(self):
+        english = run_library_with_stdin("2\n", "ask_language; echo \"picked=$LANG_CODE\"; t access_prompt")
+        chinese = run_library_with_stdin("1\n", "ask_language; echo \"picked=$LANG_CODE\"; t access_prompt")
+        self.assertIn("picked=en", english.stdout)
+        self.assertIn("Access mode", english.stdout)
+        self.assertIn("picked=zh", chinese.stdout)
+        self.assertIn("访问方式", chinese.stdout)
+
+    def test_language_flag_skips_the_question(self):
+        result = run_library_with_stdin("2\n", "LANG_EXPLICIT=1; LANG_CODE=zh; ask_language; echo \"kept=$LANG_CODE\"")
+        self.assertIn("kept=zh", result.stdout)
+        self.assertNotIn("Choose language", result.stdout)
 
 
 if __name__ == "__main__":
