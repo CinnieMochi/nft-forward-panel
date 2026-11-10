@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.2.9"
+PANEL_VERSION = "1.3.0"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0

@@ -17,16 +17,48 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.0/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
 
-# 3. 安装：交互式询问域名、证书邮箱、管理员账号和密码
+# 3. 安装：全程交互式，先选语言，再选访问方式
 sudo bash /tmp/nfp-install.sh
 ```
 
 仓库名和版本已有默认值（`--version` 默认装 **latest**，即最新 Release），所以不必再传 `--repo`。
+
+### 第一步：选择语言
+
+安装器会先问 `选择语言 / Choose language [1=中文 2=English]`，之后的**所有提示**（域名、证书邮箱、管理员账号密码、进度、报错）都跟着这个选择走。也可以直接用参数跳过：`--lang zh` 或 `--lang en`。
+
+### 第二步：选择访问方式
+
+| 选项 | 说明 | 对你机器的影响 |
+|---|---|---|
+| **1 = 域名 + HTTPS**（默认） | Caddy 自动申请并续期证书，面板只监听 `127.0.0.1:8108` | **不额外开放任何 HTTP 端口**；公网只需 80/443（云安全组） |
+| **2 = IP + 端口 HTTP** | 不用域名，面板直接监听 `0.0.0.0:<端口>`（默认 8108） | 安装器会**自动在本机防火墙放行该端口**；若没有本机防火墙会提示你去云安全组放行 |
+
+> ⚠️ **HTTP 模式是明文传输**：账号密码、Cookie、流量数据都不加密。仅在可信网络或你已有额外防护（VPN、内网、前置反代）时使用。安装器会明确警告。
+
+### 以后从 HTTP 换成域名 HTTPS
+
+重新运行同一个脚本、选 `1` 即可，安装器会：
+
+1. 保留数据库、账号、规则、流量记录；
+2. 把面板改成只监听 `127.0.0.1:8108`，并启用 `PANEL_COOKIE_SECURE=1`；
+3. 写入 Caddy 站点并申请证书；
+4. **关闭原来那个公网 HTTP 端口**（本机防火墙同步移除）。
+
+### 一键卸载
+
+```bash
+sudo bash /tmp/nfp-install.sh --uninstall          # 交互确认；默认保留数据库
+sudo bash /tmp/nfp-install.sh --uninstall --purge  # 连数据库与头像一起删除
+sudo bash /tmp/nfp-install.sh --uninstall --keep-rules --yes   # 保留 nftables 转发表、跳过确认
+```
+
+卸载会停止并禁用服务、移除 systemd unit 与 `nfpctl` 链接、删除 Caddy 站点、关闭 HTTP 模式的公网端口、把环境文件备份到 `/root` 后删除，并**默认删除 `ip port_forward` 表**（即停止所有转发；加 `--keep-rules` 可保留）。数据目录默认保留。
 
 安装完成后终端会打印访问地址，浏览器打开 `https://<你的域名>` 即可登录。证书由 Caddy 自动申请和续期。
 
@@ -35,7 +67,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.0/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +91,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.9/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.0/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.9
+sudo bash /tmp/nfp-install.sh --version v1.3.0
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -125,6 +157,7 @@ server {
 | `PANEL_MAIN_CONFIG` | `/etc/nftables.conf` | 主配置，仅用于补 include 行，不会被创建或清空 |
 | `PANEL_SYSCTL_CONFIG` | `/etc/sysctl.d/99-nft-forward.conf` | 写入 `net.ipv4.ip_forward=1` |
 | `PANEL_COOKIE_SECURE` | `1` | 是否给 Cookie 加 `Secure`；纯 HTTP 调试时设 `0` |
+| `PANEL_BIND` | `127.0.0.1:8108` | gunicorn 监听地址。域名 HTTPS 模式固定为 `127.0.0.1:8108`；IP+端口 HTTP 模式为 `0.0.0.0:<端口>` |
 | `PANEL_TRUSTED_PROXY_COUNT` | `0` | 信任的反代层数，`0` 表示完全忽略 `X-Forwarded-*` |
 | `PANEL_POLICY_SCHEDULER` | `1` | 是否启用 2 秒一次的对账线程，`0` 会让配额/到期/端口范围失效 |
 | `PANEL_LOGIN_WINDOW_SECONDS` | `600` | 登录限流窗口 |
@@ -278,8 +311,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.9 -m "v1.2.9"
-git push origin v1.2.9
+git tag -a v1.3.0 -m "v1.3.0"
+git push origin v1.3.0
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -321,6 +354,17 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.3.0
+
+- 新增：安装器支持**中英双语**（`--lang zh|en`，交互第一步选择），全部提示、进度与报错跟随所选语言。
+- 新增：安装时可选**两种访问方式**——域名 + HTTPS（Caddy 自动证书，不开放额外 HTTP 端口），或 IP + 端口 HTTP（自动在本机防火墙放行该端口，并明确警告明文风险）。
+- 新增：**访问方式迁移**。HTTP 模式以后再运行一次脚本选 HTTPS，安装器会保留数据、改用 127.0.0.1 监听、写入 Caddy 站点并**关闭原来的公网 HTTP 端口**。
+- 新增：**一键卸载** `--uninstall`（可选 `--purge` 删数据、`--keep-rules` 保留转发表、`--yes` 跳过确认）：停服务、删 unit 与 nfpctl 链接、删 Caddy 站点、关闭 HTTP 端口、备份并删除环境文件。
+- 改进：新增 `deploy/serve.sh` 作为启动器，监听地址由 `PANEL_BIND` 决定，同一份 systemd unit 适配两种模式。
+- 改进：安装器现在会**保留环境文件里你自定义的键**（此前重写会丢，有备份），P8 顺带解决。
+- 改进：HTTP 模式不安装 Caddy；HTTPS 模式才安装。
+- 测试：75 个（新增 5 个安装器用例，覆盖双语帮助、参数完整性、消息切换与校验器；CI 上运行，Windows 缺 bash 时自动跳过）。
 
 ### v1.2.9（安全与健壮性修复，建议所有部署升级）
 
