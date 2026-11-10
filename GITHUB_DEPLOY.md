@@ -46,8 +46,8 @@ git push origin main
 ## 3. 发布一个版本
 
 ```bash
-git tag -a v1.2.7 -m "v1.2.7"
-git push origin v1.2.7
+git tag -a v1.2.8 -m "v1.2.8"
+git push origin v1.2.8
 ```
 
 ### CI 会依次做什么
@@ -80,7 +80,7 @@ gh run view <run-id> --repo CinnieMochi/nft-forward-panel --log-failed
 
 ```bash
 TS=$(date +%Y%m%d-%H%M%S)
-TAG=v1.2.7   # 必须是已有的 Release 标签
+TAG=v1.2.8   # 必须是已有的 Release 标签
 
 # 1) 备份：数据库一致性快照 + 程序目录
 sqlite3 /var/lib/nft-forward-panel/panel.db ".backup '/root/nfp-$TS.db'"
@@ -126,7 +126,7 @@ systemctl start nft-forward-panel
 只有当 CI 环境本身不可用、又必须发出某个已打标签的版本时才这么做。产物必须来自**同一个标签对应的提交**，不能拿工作区里的半成品打包。
 
 ```bash
-git checkout v1.2.7
+git checkout v1.2.8
 mkdir -p /tmp/nfp-dist/nft-forward-panel
 rsync -a ./ /tmp/nfp-dist/nft-forward-panel/ \
   --exclude .git --exclude .github --exclude dist --exclude .venv \
@@ -135,7 +135,7 @@ tar -C /tmp/nfp-dist -czf /tmp/nfp-dist/nft-forward-panel.tar.gz nft-forward-pan
 cd /tmp/nfp-dist
 sha256sum nft-forward-panel.tar.gz > nft-forward-panel.tar.gz.sha256
 
-gh release create v1.2.7 --repo CinnieMochi/nft-forward-panel --verify-tag \
+gh release create v1.2.8 --repo CinnieMochi/nft-forward-panel --verify-tag \
   --generate-notes nft-forward-panel.tar.gz nft-forward-panel.tar.gz.sha256
 ```
 

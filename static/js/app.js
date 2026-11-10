@@ -233,7 +233,7 @@
       detail.textContent = `${formatBytes(usage)} / 不限额`;
       paintGauge(gauge, 0, "gauge-green");
       if (label) label.textContent = "--";
-      gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，不限额`);
+      gauge.setAttribute("aria-label", `本期已使用 ${formatBytes(usage)}，不限额`);
       return;
     }
     const percentage = usage / quota * 100;
@@ -241,7 +241,7 @@
     detail.textContent = `${formatBytes(usage)} / ${formatBytes(quota)}`;
     paintGauge(gauge, displayed / 100, gaugeTone(percentage, 50, 80));
     if (label) label.textContent = Math.round(displayed).toString();
-    gauge.setAttribute("aria-label", `本月已使用 ${formatBytes(usage)}，总额 ${formatBytes(quota)}，已用 ${percentage.toFixed(1)}%`);
+        gauge.setAttribute("aria-label", `本期已使用 ${formatBytes(usage)}，总额 ${formatBytes(quota)}，已用 ${percentage.toFixed(1)}%`);
   };
   async function loadOverview() {
     if (!overview || overviewBusy) return;
