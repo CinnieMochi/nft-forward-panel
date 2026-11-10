@@ -18,7 +18,7 @@
       <a class="nav-link" href="{{ url_for('dashboard') }}"><span>◫</span>概览与规则</a>
       <a class="nav-link" href="{{ url_for('analytics', kind='bandwidth') }}"><span>↕</span>带宽记录</a>
       <a class="nav-link" href="{{ url_for('analytics', kind='traffic') }}"><span>▥</span>流量统计</a>
-      <a class="nav-link" href="{{ url_for('analytics', kind='connections') }}"><span>⌁</span>连接统计</a>
+      <a class="nav-link" href="{{ url_for('analytics', kind='connections') }}"><span>⌁</span>实时连接</a>
       {% if user.role == 'admin' %}
       <p>管理</p>
       <a class="nav-link" href="{{ url_for('users') }}"><span>◎</span>用户与策略</a>
@@ -49,7 +49,7 @@
         <li><span>当前版本</span><strong data-version-current>v{{ panel_version }}</strong></li>
         <li><span>最新版本</span><strong data-version-latest>未查询</strong></li>
       </ul>
-      <p class="version-note" data-version-note>点击「检查最新版」向 GitHub 查询。</p>
+      <p class="version-note" data-version-note hidden></p>
       <p class="version-note success" data-version-status hidden></p>
     </div>
     <div class="dialog-actions">

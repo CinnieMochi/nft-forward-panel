@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% set titles = {'bandwidth':'带宽记录','traffic':'流量统计','connections':'连接统计'} %}
+{% set titles = {'bandwidth':'带宽记录','traffic':'流量统计','connections':'实时连接'} %}
 {% block title %}{{ titles[kind] }} · Mochi Forward{% endblock %}{% block page_name %}{{ titles[kind] }}{% endblock %}
 {% block content %}
 <section class="page-heading">

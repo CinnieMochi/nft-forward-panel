@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.1/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.1
+sudo bash /tmp/nfp-install.sh --version v1.2.2
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -183,8 +183,11 @@ server {
 
 ## 界面小工具
 
-- **隐藏端口与目标地址**：概览页「入口地址」右侧的 ◉ 按钮，一键把规则表的**监听端口**和**目标地址**替换成占位符，再点恢复；状态记在浏览器本地，刷新后保持。
-- **用户管理**：管理员在「用户与策略」可以对账户执行**编辑**（用户名 / 邮箱，身份 ID 不可改）和**删除**。删除会一并清掉该账户的历史流量记录；若它仍拥有转发规则，会要求先删除或转移规则；审计日志保留（只解绑操作者）。不能删除自己，也不会删掉最后一个启用的管理员。
+- **隐藏地址与端口**：概览页「入口地址」右侧的**眼睛按钮**（睁眼 = 明文，闭眼 = 已隐藏），一键把**入口地址**、规则表的**监听端口**和**目标地址**换成占位符；状态记在浏览器本地，刷新后保持。适合截图、录屏或共享屏幕。
+- **用户管理**：管理员在「用户与策略」每行有三个入口——**策略**、**编辑**（用户名 / 邮箱，身份 ID 不可改）、**⋯ 更多**（修改密码 / 停用启用 / 删除账户），避免一排按钮挤在一起。
+- **修改密码**：新密码支持**眼睛切换明文**、**一键复制**、**生成 20 位随机强密码**，提交前有二次确认，提交后该账户的所有登录会话立即失效。
+  > 当前密码**无法查看**：数据库里只存单向哈希（Werkzeug PBKDF2），任何人包括管理员都不可逆推。这是刻意的安全设计，也是"忘记密码只能重置"的原因。
+- **实时连接页**：每条规则的**备注**会一并显示，方便辨认是哪条业务；备注在这里**只读**，要改请去「概览与规则」。
 
 ## SSH 备用管理（nfpctl）
 
@@ -263,8 +266,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.1 -m "v1.2.1"
-git push origin v1.2.1
+git tag -a v1.2.2 -m "v1.2.2"
+git push origin v1.2.2
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -306,6 +309,16 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.2.2
+
+- 修复：概览页「入口地址」的 IP 不会被隐藏开关遮住；复制与显示/隐藏两个按钮尺寸不一致。
+- 改进：显示/隐藏换成**睁眼 / 闭眼**图标，与密码输入框的显隐一致。
+- 改进：「连接统计」更名为**「实时连接」**，更贴近实际含义。
+- 新增：「实时连接」列表展示每条规则的**备注**（只读），备注仍在「概览与规则」中修改。
+- 改进：「用户与策略」操作列由 4 个平铺按钮改为 **策略 / 编辑 / ⋯更多**，菜单里是修改密码、停用启用、删除账户。
+- 新增：管理员可为账户**重置密码**——眼睛切换明文、复制、生成随机强密码、二次确认；服务端也校验两次输入一致。
+- 改进：版本对话框不再常驻显示"已是最新版本"，只在点「检查最新版」后提示 4 秒。
 
 ### v1.2.1
 

@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.2.1"
+PANEL_VERSION = "1.2.2"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0
@@ -1920,6 +1920,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         require_csrf()
         try:
             password = validate_password(request.form.get("password", ""))
+            if request.form.get("confirm_password") is not None:
+                confirmation = request.form.get("confirm_password", "")
+                if confirmation != password:
+                    raise ValueError("两次输入的新密码不一致。")
             connection = get_db()
             target = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             if target is None:
@@ -2041,6 +2045,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                 "tx_bps": live.get(rule["id"], {}).get("tx_bps", 0),
                 "connections": 0 if rule["paused_reason"] else connections.get(int(rule["listen_port"]), 0),
                 "paused_reason": rule["paused_reason"], "paused_label": pause_label(rule["paused_reason"]),
+                "note": rule["note"],
                 "inbound_limit_mbps": rule["inbound_limit_mbps"], "outbound_limit_mbps": rule["outbound_limit_mbps"],
             })
         monthly_bytes = monthly_usage(connection, user)

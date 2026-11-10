@@ -1272,6 +1272,60 @@ class SecurityRegressionTests(unittest.TestCase):
             connection.close()
         self.assertIsNotNone(still_there)
 
+    def test_password_reset_requires_matching_confirmation(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            member = connection.execute("SELECT * FROM users WHERE username='member'").fetchone()
+            before = member[3]
+        finally:
+            connection.close()
+        token = csrf_token(admin.get("/users"))
+        response = admin.post(
+            f"/users/{member[0]}/password",
+            data={"csrf_token": token, "password": "BrandNewPass!2026", "confirm_password": "DifferentPass!2026"},
+        )
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            after = connection.execute("SELECT password_hash FROM users WHERE id=?", (member[0],)).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(after, before)
+
+        response = admin.post(
+            f"/users/{member[0]}/password",
+            data={"csrf_token": token, "password": "BrandNewPass!2026", "confirm_password": "BrandNewPass!2026"},
+        )
+        self.assertEqual(response.status_code, 302)
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            changed = connection.execute("SELECT password_hash FROM users WHERE id=?", (member[0],)).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertNotEqual(changed, before)
+
+    def test_overview_exposes_rule_note_read_only(self):
+        admin = self.web.test_client()
+        self.login(admin, "admin", "PreviewOnly!2026")
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            owner_id = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO forward_rules (listen_port, destination_ip, destination_port, owner_id, note, created_at) "
+                "VALUES (10123, '8.8.8.8', 443, ?, '香港入口', '2026-01-01 00:00:00 UTC')",
+                (owner_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with patch("app.cached_connection_snapshot", return_value={"ports": {}, "tcp_ports": {}, "udp_ports": {}}), \
+             patch("app.cached_probe", return_value={"reachable": True, "latency_ms": 1.0}):
+            payload = admin.get("/api/overview").get_json()
+        notes = {rule["listen_port"]: rule["note"] for rule in payload["rules"]}
+        self.assertEqual(notes.get(10123), "香港入口")
+
 
 if __name__ == "__main__":
     unittest.main()

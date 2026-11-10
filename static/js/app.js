@@ -259,9 +259,12 @@
           const state = document.createElement("small");
           state.className = "block";
           state.textContent = `${rule.owner} · ${rule.paused_reason ? rule.paused_label : (rule.reachable ? `${rule.latency_ms} ms` : "目标不可达")}`;
+          const note = document.createElement("small");
+          note.className = "block connection-note";
+          note.textContent = rule.note ? `备注：${rule.note}` : "备注：未备注";
           const count = document.createElement("strong");
           count.textContent = String(rule.connections);
-          details.append(destination, state);
+          details.append(destination, state, note);
           item.append(details, count);
           list.append(item);
         });
@@ -507,22 +510,28 @@
       statusEl.classList.toggle("warn", tone === "warn");
     };
 
-    const render = (data) => {
+    let noteTimer = 0;
+    const flashNote = (text, warn) => {
+      window.clearTimeout(noteTimer);
+      noteEl.hidden = false;
+      noteEl.textContent = text;
+      noteEl.classList.toggle("warn", Boolean(warn));
+      noteTimer = window.setTimeout(() => { noteEl.hidden = true; noteEl.textContent = ""; }, 4000);
+    };
+
+    const render = (data, announce) => {
       currentEl.textContent = "v" + data.current;
       latestEl.textContent = data.latest_known ? "v" + data.latest : "查询失败";
       const active = ACTIVE.test(String(data.status?.phase || ""));
       if (!data.latest_known) {
-        noteEl.textContent = "面板无法连接 GitHub，请检查服务器出网。";
-        noteEl.classList.add("warn");
+        if (announce) flashNote("无法连接 GitHub，请检查服务器出网。", true);
         updateBtn.hidden = true;
       } else if (data.update_available) {
-        noteEl.textContent = "有新版本可用。";
-        noteEl.classList.add("warn");
+        if (announce) flashNote("有新版本可用。", true);
         pendingTag = "v" + data.latest;
         updateBtn.hidden = !(data.can_update && !active);
       } else {
-        noteEl.textContent = "已经是最新版本。";
-        noteEl.classList.remove("warn");
+        if (announce) flashNote("当前已是最新版本。");
         updateBtn.hidden = true;
       }
       if (data.release_url) linkEl.href = data.release_url;
@@ -532,15 +541,15 @@
       }
     };
 
-    const loadVersion = async (refresh) => {
+    const loadVersion = async (refresh, announce) => {
       try {
         const response = await fetch("/api/version" + (refresh ? "?refresh=1" : ""), {headers: {Accept: "application/json"}});
         if (!response.ok) throw new Error("status " + response.status);
-        render(await response.json());
+        render(await response.json(), announce);
         return true;
       } catch (_) {
         latestEl.textContent = "查询失败";
-        noteEl.textContent = "面板暂时无法获取版本信息。";
+        if (announce) flashNote("面板暂时无法获取版本信息。", true);
         return false;
       }
     };
@@ -560,7 +569,7 @@
           showStatus(String(status.message || "更新失败"), "warn");
           window.clearInterval(pollTimer);
           updateBtn.disabled = false;
-          loadVersion(true);
+          loadVersion(true, false);
           return;
         }
         if (ACTIVE.test(phase)) showStatus(String(status.message || "更新进行中…"));
@@ -573,13 +582,13 @@
     };
 
     document.querySelectorAll('[data-dialog-open="version-dialog"]').forEach((button) => {
-      button.addEventListener("click", () => loadVersion(false));
+      button.addEventListener("click", () => loadVersion(false, false));
     });
 
     checkBtn?.addEventListener("click", async () => {
       checkBtn.disabled = true;
       checkBtn.textContent = "查询中…";
-      await loadVersion(true);
+      await loadVersion(true, true);
       checkBtn.disabled = false;
       checkBtn.textContent = "检查最新版";
     });
@@ -619,9 +628,8 @@
           cell.innerHTML = cell.dataset.originalHtml;
         }
       });
-      maskToggle.textContent = masked ? "◌" : "◉";
       maskToggle.setAttribute("aria-pressed", String(masked));
-      const label = masked ? "显示端口与目标地址" : "隐藏端口与目标地址";
+      const label = masked ? "显示地址与端口" : "隐藏地址与端口";
       maskToggle.setAttribute("aria-label", label);
       maskToggle.setAttribute("title", label);
       window.localStorage.setItem(KEY, masked ? "1" : "0");
@@ -629,4 +637,85 @@
     maskToggle.addEventListener("click", () => applyMask(maskToggle.getAttribute("aria-pressed") !== "true"));
     if (window.localStorage.getItem(KEY) === "1") applyMask(true);
   }
+
+  // --- password fields: reveal, copy, generate, confirm on submit -------
+  const copySecret = async (text) => {
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      const input = document.createElement("textarea");
+      input.value = text;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.append(input);
+      input.select();
+      const ok = document.execCommand("copy");
+      input.remove();
+      return ok;
+    }
+  };
+
+  document.querySelectorAll("[data-secret-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const field = button.closest(".secret-row")?.querySelector("[data-secret-input]");
+      if (!field) return;
+      const reveal = button.getAttribute("aria-pressed") !== "true";
+      field.type = reveal ? "text" : "password";
+      button.setAttribute("aria-pressed", String(reveal));
+      const label = reveal ? "隐藏密码" : "显示密码";
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+    });
+  });
+
+  document.querySelectorAll("[data-secret-copy]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const field = button.closest(".secret-row")?.querySelector("[data-secret-input]");
+      if (!field || !field.value) { window.alert("请先生成或输入密码后再复制。"); return; }
+      await copySecret(field.value);
+      const label = button.getAttribute("aria-label") || "复制密码";
+      button.setAttribute("title", "已复制");
+      window.setTimeout(() => button.setAttribute("title", label), 1400);
+    });
+  });
+
+  document.querySelectorAll("[data-secret-generate]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = button.closest("form");
+      if (!form) return;
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%*?";
+      const values = new Uint32Array(20);
+      window.crypto.getRandomValues(values);
+      const password = Array.from(values, (value) => alphabet[value % alphabet.length]).join("");
+      const field = form.querySelector('[name="password"]');
+      const confirmation = form.querySelector('[name="confirm_password"]');
+      if (field) { field.value = password; field.type = "text"; }
+      if (confirmation) confirmation.value = password;
+      const toggle = form.querySelector("[data-secret-toggle]");
+      if (toggle) {
+        toggle.setAttribute("aria-pressed", "true");
+        toggle.setAttribute("aria-label", "隐藏密码");
+        toggle.setAttribute("title", "隐藏密码");
+      }
+    });
+  });
+
+  document.querySelectorAll(".action-menu").forEach((menu) => {
+    menu.addEventListener("click", (event) => {
+      if (event.target.closest(".action-item")) menu.removeAttribute("open");
+    });
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".action-menu")) {
+      document.querySelectorAll(".action-menu[open]").forEach((menu) => menu.removeAttribute("open"));
+    }
+  });
+
+  document.querySelectorAll("form[data-confirm]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (!window.confirm(form.dataset.confirm || "确认执行该操作？")) event.preventDefault();
+    });
+  });
 })();
