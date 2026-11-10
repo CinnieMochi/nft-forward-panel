@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.3/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -67,7 +67,7 @@ sudo bash /tmp/nfp-install.sh --uninstall --keep-rules --yes   # 保留 nftables
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.3/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -91,9 +91,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.3.3/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.3.2
+sudo bash /tmp/nfp-install.sh --version v1.3.3
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -311,8 +311,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.3.2 -m "v1.3.2"
-git push origin v1.3.2
+git tag -a v1.3.3 -m "v1.3.3"
+git push origin v1.3.3
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -354,6 +354,14 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.3.3
+
+- 修复（P13）：流量桶的 60 天保留策略此前只在**对账线程**里执行，把 `PANEL_POLICY_SCHEDULER` 设为 0 的部署永不清理。现在进程启动时也会清理一次。
+  > 注意：若某台机器此前关过对账线程并因此积累了更早的数据，升级后首次启动会按策略清理这些超过 60 天的桶。这是保留策略的预期行为。
+- 修复（P15）：HTTPS 模式没有在本机防火墙放行 80/443。在开着 ufw/firewalld 的机器上，Caddy 收不到 ACME 验证、证书申请会失败，而健康检查（走 127.0.0.1）发现不了。现在 HTTPS 模式会显式放行这两个端口。
+- 改进（P16）：`env_escape` 移到库模式守卫之前，新增单测覆盖含引号、反斜杠与中文的密码（此前只能人工验证）。
+- 测试：修正一处既有迁移用例的夹具日期——它用 106 天前的时间戳，会先被保留策略清掉，导致误报。
 
 ### v1.3.2
 

@@ -71,7 +71,7 @@ _connection_cache: tuple[float, dict[str, object]] = (
 )
 _probe_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
-PANEL_VERSION = "1.3.2"
+PANEL_VERSION = "1.3.3"
 UPDATE_REPO = os.environ.get("PANEL_UPDATE_REPO", "CinnieMochi/nft-forward-panel")
 UPDATE_ARCHIVE_NAME = "nft-forward-panel.tar.gz"
 LATEST_RELEASE_TTL = 900.0
@@ -691,9 +691,10 @@ def init_schema(app: Flask) -> None:
                 "INSERT INTO audit_events (actor_id, action, target, details, remote_addr, created_at) VALUES (?, 'bootstrap', ?, ?, '', ?)",
                 (admin_id, identity_id, f"首次管理员账户已创建; username={username}", now()),
             )
+        buckets = prune_traffic_buckets(connection)
         pruned = prune_expired_packages(connection)
-        if pruned:
-            app.logger.info("Pruned %s expired traffic packages", pruned)
+        if pruned or buckets:
+            app.logger.info("Pruned %s traffic buckets and %s expired packages", buckets, pruned)
         connection.commit()
     finally:
         connection.close()

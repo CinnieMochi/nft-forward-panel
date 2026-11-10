@@ -250,6 +250,8 @@ ask_language() {
 # --------------------------------------------------------------------------
 # Library mode: source this file to unit-test the catalog and pure helpers.
 # --------------------------------------------------------------------------
+env_escape() { local value="$1"; value="${value//\\/\\\\}"; value="${value//\"/\\\"}"; printf '"%s"' "$value"; }
+
 load_messages
 if [[ "${NFP_INSTALLER_LIB:-0}" == "1" ]]; then
     return 0 2>/dev/null || exit 0
@@ -565,7 +567,6 @@ if [[ -f "$ENV_FILE" ]]; then
         | grep -Ev '^(PANEL_SECRET_KEY|PANEL_ADMIN_USERNAME|PANEL_ADMIN_PASSWORD|PANEL_DATA_DIR|PANEL_FORWARD_CONFIG|PANEL_MAIN_CONFIG|PANEL_SYSCTL_CONFIG|PANEL_COOKIE_SECURE|PANEL_TRUSTED_PROXY_COUNT|PANEL_POLICY_SCHEDULER|PANEL_LOGIN_WINDOW_SECONDS|PANEL_LOGIN_MAX_ATTEMPTS|PANEL_TIMEZONE|PANEL_BIND)=' || true)
 fi
 secret_key="${secret_key:-$(openssl rand -hex 32)}"
-env_escape() { local value="$1"; value="${value//\\/\\\\}"; value="${value//\"/\\\"}"; printf '"%s"' "$value"; }
 
 if [[ "$ACCESS_MODE" == "https" ]]; then
     panel_bind="$LOCAL_BIND"
@@ -658,6 +659,10 @@ EOF
     systemctl enable --now caddy
     systemctl reload caddy
     log "$(t caddy_done "$DOMAIN")"
+    # Caddy needs 80 (ACME HTTP-01) and 443 reachable; the panel itself stays on
+    # 127.0.0.1, so these two ports are the whole public surface.
+    firewall_open_port 80
+    firewall_open_port 443
     # Leaving the old public HTTP port open after the switch would be a stale
     # hole: nothing listens there any more, but a later service would inherit it.
     if [[ "$previous_mode" == "http" && -n "$previous_port" ]]; then

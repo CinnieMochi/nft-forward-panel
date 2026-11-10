@@ -436,6 +436,10 @@ class SecurityRegressionTests(unittest.TestCase):
             connection.close()
 
     def test_startup_migrates_legacy_traffic_unique_key_to_owner_dimension(self):
+        # Keep this fixture inside the 60-day retention window: init_schema now
+        # prunes older buckets at startup, so an old literal would be gone before
+        # the migration assertions could look at it.
+        stamp = now()
         data_dir = Path(self.tmp.name) / "legacy-owner-buckets"
         config = {
             "TESTING": True,
@@ -473,8 +477,8 @@ class SecurityRegressionTests(unittest.TestCase):
             connection.execute(
                 """INSERT INTO traffic_buckets
                    (id, rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
-                   VALUES (7, 99, ?, '2026-07-27 12:00:00 UTC', 123, 456)""",
-                (admin_id,),
+                   VALUES (7, 99, ?, ?, 123, 456)""",
+                (admin_id, stamp),
             )
             connection.commit()
         finally:
@@ -488,7 +492,7 @@ class SecurityRegressionTests(unittest.TestCase):
                     """SELECT rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes
                        FROM traffic_buckets"""
                 ).fetchone(),
-                (99, admin_id, "2026-07-27 12:00:00 UTC", 123, 456),
+                (99, admin_id, stamp, 123, 456),
             )
             unique_keys = {
                 tuple(
@@ -505,15 +509,15 @@ class SecurityRegressionTests(unittest.TestCase):
             connection.execute(
                 """INSERT INTO traffic_buckets
                    (rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
-                   VALUES (99, ?, '2026-07-27 12:00:00 UTC', 10, 20)""",
-                (member_id,),
+                   VALUES (99, ?, ?, 10, 20)""",
+                (member_id, stamp),
             )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     """INSERT INTO traffic_buckets
                        (rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes)
-                       VALUES (99, ?, '2026-07-27 12:00:00 UTC', 1, 2)""",
-                    (member_id,),
+                       VALUES (99, ?, ?, 1, 2)""",
+                    (member_id, stamp),
                 )
             self.assertEqual(
                 connection.execute("PRAGMA integrity_check").fetchone()[0],
@@ -1502,6 +1506,39 @@ class SecurityRegressionTests(unittest.TestCase):
         # P7: never source shell generated from the release API response
         self.assertNotIn('. "$WORK/meta"', text)
         self.assertIn('case "$URL" in', text)
+
+
+    def test_startup_prunes_stale_traffic_buckets(self):
+        # P13: a deployment with the policy scheduler disabled still prunes at boot
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            owner = connection.execute("SELECT id FROM users WHERE username='member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO traffic_buckets (rule_id, owner_id, bucket_at, inbound_bytes, outbound_bytes, rx_bytes, tx_bytes) "
+                "VALUES (0, ?, '2020-01-01 00:00:00 UTC', 10, 0, 10, 0)",
+                (owner,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        create_app(
+            {
+                "TESTING": True,
+                "DATA_DIR": self.web.config["DATA_DIR"],
+                "DATABASE": self.web.config["DATABASE"],
+                "FORWARD_CONFIG": self.web.config["FORWARD_CONFIG"],
+                "MAIN_CONFIG": self.web.config["MAIN_CONFIG"],
+                "SYSCTL_CONFIG": self.web.config["SYSCTL_CONFIG"],
+            }
+        )
+        connection = sqlite3.connect(self.web.config["DATABASE"])
+        try:
+            left = connection.execute(
+                "SELECT COUNT(*) FROM traffic_buckets WHERE bucket_at < '2021-01-01'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(left, 0)
 
 
 if __name__ == "__main__":

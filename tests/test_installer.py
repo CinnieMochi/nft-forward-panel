@@ -146,5 +146,20 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("Choose language", result.stdout)
 
 
+    def test_https_mode_opens_the_public_ports(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        # Caddy cannot answer ACME on 80 or serve 443 through a blocking firewall
+        self.assertIn("firewall_open_port 80", text)
+        self.assertIn("firewall_open_port 443", text)
+
+    def test_env_escape_round_trips_quotes_and_backslashes(self):
+        environment = clean_env()
+        environment["NFP_INSTALLER_LIB"] = "1"
+        environment["V_TEST"] = 'a"b\\c d'
+        result = run([BASH, "-c", 'source ./install.sh\nenv_escape "$V_TEST"; echo'], env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '"a\\"b\\\\c d"')
+
+
 if __name__ == "__main__":
     unittest.main()
