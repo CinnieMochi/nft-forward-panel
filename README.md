@@ -17,7 +17,7 @@
 
 ```bash
 # 1. 下载安装器
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.3/install.sh -o /tmp/nfp-install.sh
 
 # 2. 先审阅，再执行（不要 curl | bash）
 less /tmp/nfp-install.sh
@@ -35,7 +35,7 @@ sudo bash /tmp/nfp-install.sh
 适合脚本化或重复部署。密码只通过环境变量传入，不会进 shell 历史：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.3/install.sh -o /tmp/nfp-install.sh
 sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
   --non-interactive \
   --domain panel.example.com \
@@ -59,9 +59,9 @@ sudo NFP_ADMIN_PASSWORD='至少12位的强密码' bash /tmp/nfp-install.sh \
 重复执行安装器并填入**同一个域名**即可。升级会保留 `/var/lib/nft-forward-panel` 里的数据库和头像，并在覆盖前备份旧程序目录、环境文件、`/etc/nftables.conf` 和 `Caddyfile`。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.2/install.sh -o /tmp/nfp-install.sh
+curl -fsSL https://raw.githubusercontent.com/CinnieMochi/nft-forward-panel/v1.2.3/install.sh -o /tmp/nfp-install.sh
 less /tmp/nfp-install.sh
-sudo bash /tmp/nfp-install.sh --version v1.2.2
+sudo bash /tmp/nfp-install.sh --version v1.2.3
 ```
 
 > 固定 `--version` 到明确的 Release 标签，不要跟着可变的 `main` 分支走。
@@ -266,8 +266,8 @@ flask --app app run --debug
 ## 发布流程
 
 ```bash
-git tag -a v1.2.2 -m "v1.2.2"
-git push origin v1.2.2
+git tag -a v1.2.3 -m "v1.2.3"
+git push origin v1.2.3
 ```
 
 推送 `v*` 标签会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：跑完整测试 → `bash -n` 检查安装器 → 打包并生成 SHA-256 → **校验包内布局**（必需文件齐全、不含 `.git`/`.github`）→ 创建 GitHub Release 并附上两个资产。
@@ -309,6 +309,12 @@ sudo nfpctl status
 ---
 
 ## 版本
+
+### v1.2.3
+
+- **修复 v1.2.2 的样式表回归**：发布包里的 `static/css/app.css` 被截断（50,061 → 22,905 字节，多行卡在 2034 字符），导致全站样式失效、SVG 尺寸失控。现已从 v1.2.1 逐字节恢复，v1.2.2 的功能改动全部保留。
+- 设计语言未改动：样式表前 50,061 字节与 v1.2.1 **哈希一致**，新增规则只针对新组件（眼睛按钮、操作菜单、密码输入行、备注行），仅调整了操作列宽度（100 → 170px）以容纳新的三控件布局。
+- 教训：不要用"读全文 → 改 → 写回"的方式编辑单行超长的压缩文件（`read` 会截断超长行）。
 
 ### v1.2.2
 
